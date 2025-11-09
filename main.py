@@ -21,4 +21,4 @@ async def ruru(interaction: discord.Interaction):
     await interaction.response.send_message("るる " * 5)
 
 keep_alive()  # ← Webサーバーを起動してBotを維持
-client.run(TOKEN)
+client.run(MTQzNjk1Njk3NTUyNjMxODE4Mw.Gy0m0Y.REoyjB0LM6s2j0wlooz0sBNpQa45WquzmZTuDU)
