@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+*.env.*
+venv/
+ENV/
+env/
+.venv/
+.replit
+.vscode/
+secrets.json
+config.json
