@@ -1,14 +1,4 @@
-__pycache__/
+.env
+
+_pycacha_/
 *.pyc
-*.pyo
-*.pyd
-*.env
-*.env.*
-venv/
-ENV/
-env/
-.venv/
-.replit
-.vscode/
-secrets.json
-config.json
