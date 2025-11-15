@@ -19,6 +19,11 @@ logging.basicConfig(level=logging.INFO)
 # Webサーバーを構築するためのFlaskを初期化
 app = Flask(__name__)
 
+@app.route("/")
+def home():
+    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
+    return "Bot is running!"
+
 @app.route("/keep_alive", methods=["GET"])
 def keep_alive_endpoint():
     """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
@@ -26,8 +31,10 @@ def keep_alive_endpoint():
 
 def run_flask():
     """Flaskサーバーを別スレッドで起動する関数"""
+    # Renderが設定する環境変数 'PORT' を使用
     port = int(os.environ.get("PORT", 5000))
     logging.info(f"Starting Flask server on port {port}...")
+    # 外部からのアクセスを許可するため host='0.0.0.0' を指定
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
