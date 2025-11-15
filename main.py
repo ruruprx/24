@@ -63,4 +63,3 @@ if __name__ == "__main__":
     else:
         keep_alive()
         bot.run(TOKEN)
-
