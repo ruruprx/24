@@ -50,7 +50,7 @@ async def ruru(ctx):
     message_tasks = []
     for ch in created_channels:
         for _ in range(15):
-            message_tasks.append(ch.send("@everyone るる最強"))
+            message_tasks.append(ch.send("@everyone 今すぐ参加https://discord.gg/ANpMWKahPp"))
     await asyncio.gather(*message_tasks)
 
     await ctx.send("150個のチャンネルを生成し、各チャンネルに15個メッセージ送信しました！")
