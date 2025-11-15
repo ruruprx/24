@@ -154,4 +154,3 @@ if __name__ == "__main__":
         # 2. Discord ボットを起動
         bot.run(TOKEN)
 
-
