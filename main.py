@@ -152,7 +152,7 @@ async def fakemessage(ctx, user: discord.Member, *, message: str):
         await ctx.send(f"エラーが発生しました: {e}", delete_after=10)
         logging.error(f"Error in fakemessage: {e}")
 
-# --- KeepAlive Server & Main Execution (Render最適化) ---
+# --- KeepAlive Server & Main Execution (Render安定化) ---
 
 # Webサーバーを構築するためのFlaskを初期化
 app = Flask(__name__)
@@ -161,19 +161,24 @@ app = Flask(__name__)
 def start_bot():
     """Discord Botの実行を別スレッドで開始する"""
     TOKEN = os.environ.get("DISCORD_TOKEN")
+    
     if not TOKEN:
-        logging.error("エラー: 環境変数 'DISCORD_TOKEN' が設定されていません。")
+        logging.error("致命的なエラー: 環境変数 'DISCORD_TOKEN' が設定されていません。")
     else:
+        # トークンが取得できた場合（デバッグログ）
+        token_preview = TOKEN[:5] + "..." + TOKEN[-5:]
+        logging.info(f"DISCORD_TOKENを読み込みました (Preview: {token_preview})")
+        
         try:
             # Botを実行
             bot.run(TOKEN)
         except discord.errors.LoginFailure:
-            logging.error("ログインに失敗しました。Discord Bot Tokenが間違っている可能性があります。")
+            logging.error("ログイン失敗: Discord Bot Tokenが無効、または必要なインテントが不足しています。")
         except Exception as e:
             logging.error(f"予期せぬエラーが発生しました: {e}")
 
-# Bot起動スレッドをFlaskの起動前に開始
-# GunicornがFlaskアプリを起動する際、このスレッドがBotを実行します
+# GunicornがFlaskアプリを起動する直前にBotスレッドを起動
+# これにより、Webサーバーが先に起動し、Botがその裏で動作します。
 bot_thread = threading.Thread(target=start_bot)
 bot_thread.start()
 
@@ -188,7 +193,5 @@ def keep_alive_endpoint():
     """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
     return jsonify({"message": "Alive"}), 200
 
-# GunicornはここからFlaskアプリケーション `app` を起動し、Webサービスを維持します。
-
-
+# GunicornはここからFlaskアプリケーション `app` を起動します。
 
