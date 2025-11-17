@@ -3,4 +3,5 @@ Flask
 gunicorn
 requests
 colorama
-PyNaCi
+PyNaCl
+
