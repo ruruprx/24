@@ -1,4 +1,4 @@
-Import os
+import os
 import threading
 from flask import Flask, jsonify
 import discord
@@ -13,49 +13,16 @@ from os import name as os_name, system
 from sys import exit
 
 # ログの設定
-# INFOレベルでログを出力
 logging.basicConfig(level=logging.INFO)
 
-# --- KeepAlive Server for Render & UptimeRobot ---
-# Webサーバーを構築するためのFlaskを初期化
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
-    return "Bot is running!"
-
-@app.route("/keep_alive", methods=["GET"])
-def keep_alive_endpoint():
-    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
-    return jsonify({"message": "Alive"}), 200
-
-def run_flask():
-    """Flaskサーバーを別スレッドで起動する関数"""
-    # Renderが設定する環境変数 'PORT' を使用
-    port = int(os.environ.get("PORT", 5000))
-    logging.info(f"Starting Flask server on port {port}...")
-    # 外部からのアクセスを許可するため host='0.0.0.0' を指定
-    # 注: Renderの推奨デプロイ方法 (Gunicorn) ではこの関数は使わず、
-    # 'gunicorn main:app' コマンドで実行されます。
-    # ただし、threadingを使ったこの方式でも動作は可能です。
-    app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    """Webサーバーをメインのボット処理と並行して起動する"""
-    t = threading.Thread(target=run_flask)
-    t.start()
-    logging.info("Keep-alive server started.")
-
 # --- Discord Bot Setup ---
-# 必要なインテントを設定
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
 intents.members = True
 intents.message_content = True
 
-# ボットのクライアントオブジェクトを初期化。プレフィックスは '!'
+# ボットのクライアントオブジェクトを初期化
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # デフォルトのヘルプコマンドを削除
@@ -68,36 +35,29 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Game(name="友達のサーバーで便利なBot")
     )
-    # ボットが認識しているサーバー数をログに出力
-    logging.info(f"Bot is ready! Logged in as {bot.user}")
-    logging.info(f"Currently in {len(bot.guilds)} guilds.")
+    logging.info("Bot is ready!")
+    logging.info(f"Logged in as {bot.user}")
 
 @bot.event
 async def on_guild_join(guild):
     logging.info(f"Joined {guild.name}")
 
 #### PING COMMAND ####
-# エラーの原因となっていた @bot.slash_command を @bot.command に修正
 @bot.command(name="ping", description="ボットの遅延 (Ping) を計算しDMで送信するコマンド")
 async def ping(ctx):
     """ボットの遅延 (Ping) を計算しDMで送信するコマンド (!ping)"""
-    # コマンドメッセージを削除 (オプション)
     try:
         await ctx.message.delete()
     except discord.Forbidden:
-        logging.warning("Failed to delete message: Missing 'manage_messages' permission.")
+        pass
         
     member = ctx.message.author
-
-    # bot.latency を使って、より正確なAPI遅延を取得 (秒単位 -> ミリ秒単位)
     latency_ms = round(bot.latency * 1000)
 
     embed=discord.Embed(title="Pong!", description=f'Ping: {latency_ms}ms', color=0x2874A6)
     
-    # 応答をユーザーのDMに送信
     try:
         await member.send(embed=embed)
-        # DM送信後、コマンドが実行されたチャンネルに一時的な通知を送る
         await ctx.send("Pingの結果をDMに送信しました。", delete_after=5)
     except discord.Forbidden:
         await ctx.send("DMがブロックされているか、DMが無効になっています。", delete_after=10)
@@ -111,12 +71,10 @@ async def info(ctx, member: discord.Member=None):
     try:
         await ctx.message.delete()
     except discord.Forbidden:
-        pass # 削除権限がない場合は無視
+        pass
         
-    # ターゲットメンバーを定義
     target_member = member or ctx.author
 
-    # 埋め込みメッセージを使用して見やすくする
     embed = discord.Embed(
         title=f"{target_member.display_name} の情報",
         color=target_member.color if target_member.color != discord.Color.default() else 0x2874A6
@@ -129,7 +87,6 @@ async def info(ctx, member: discord.Member=None):
     embed.add_field(name="最高の役職", value=target_member.top_role.name, inline=True)
     embed.add_field(name="参加日時", value=target_member.joined_at.strftime('%Y/%m/%d %H:%M:%S'), inline=False)
     
-    # 応答をチャンネルに送信
     await ctx.send(embed=embed, delete_after=20)
     logging.info("Action completed: User Info")
 
@@ -176,7 +133,6 @@ async def guess(ctx, number: int):
 async def fakemessage(ctx, user: discord.Member, *, message: str):
     """指定されたユーザーからのフェイクメッセージを送信するコマンド (!fakemessage <@user> <メッセージ>)"""
     
-    # チャンネルにWebhookを作成し、メッセージを送信後、すぐに削除する
     try:
         webhook = await ctx.channel.create_webhook(name=user.display_name)
         await webhook.send(
@@ -185,8 +141,6 @@ async def fakemessage(ctx, user: discord.Member, *, message: str):
             avatar_url=user.avatar.url if user.avatar else None
         )
         await webhook.delete()
-        
-        # 元のコマンドメッセージを削除
         await ctx.message.delete()
         
         logging.info(f"Fake message sent from {user.display_name} in {ctx.channel.name}")
@@ -198,30 +152,43 @@ async def fakemessage(ctx, user: discord.Member, *, message: str):
         await ctx.send(f"エラーが発生しました: {e}", delete_after=10)
         logging.error(f"Error in fakemessage: {e}")
 
+# --- KeepAlive Server & Main Execution (Render最適化) ---
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    # 環境変数からトークンを直接取得
-    # Render環境では、DISCORD_TOKENを環境変数として設定する必要があります。
+# Webサーバーを構築するためのFlaskを初期化
+app = Flask(__name__)
+
+# Discord Botを別スレッドで起動する関数
+def start_bot():
+    """Discord Botの実行を別スレッドで開始する"""
     TOKEN = os.environ.get("DISCORD_TOKEN")
-
     if not TOKEN:
-        # トークンがない場合はエラーを出力して終了
         logging.error("エラー: 環境変数 'DISCORD_TOKEN' が設定されていません。")
-        # sys.exit(1) # Renderでビルドが成功したため、実行時にエラーを出すのみ
     else:
-        # 1. Keep-alive サーバーを起動
-        # 注: Renderで推奨されるGunicornを使用する場合、このthreadingによる起動は不要ですが、
-        # アプリケーションを単純に 'python main.py' で実行する場合は必要です。
-        # Renderの推奨設定に合わせて、threadingではなくgunicornで実行することを前提とします。
-        # したがって、このkeep_alive()呼び出しは、もしRenderの実行コマンドが単純な 'python main.py' でない限り、コメントアウトしても安全です。
-        # keep_alive() 
-
-        # 2. Discord ボットを起動
         try:
+            # Botを実行
             bot.run(TOKEN)
         except discord.errors.LoginFailure:
             logging.error("ログインに失敗しました。Discord Bot Tokenが間違っている可能性があります。")
         except Exception as e:
             logging.error(f"予期せぬエラーが発生しました: {e}")
+
+# Bot起動スレッドをFlaskの起動前に開始
+# GunicornがFlaskアプリを起動する際、このスレッドがBotを実行します
+bot_thread = threading.Thread(target=start_bot)
+bot_thread.start()
+
+
+@app.route("/")
+def home():
+    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
+    return "Bot is running!"
+
+@app.route("/keep_alive", methods=["GET"])
+def keep_alive_endpoint():
+    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
+    return jsonify({"message": "Alive"}), 200
+
+# GunicornはここからFlaskアプリケーション `app` を起動し、Webサービスを維持します。
+
+
 
