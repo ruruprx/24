@@ -185,4 +185,7 @@ async def ping_slash(interaction: discord.Interaction):
 @app_commands.describe(member="情報を表示するメンバーを指定 (省略可)")
 async def info_slash(interaction: discord.Interaction, member: discord.Member = None):
     """指定されたユーザーまたはコマンド実行者の情報を表示します。"""
-    target_member = member or
+    target_member = member or interaction.user
+    embed = discord.Embed(
+        title=f"{target_member.display_name} の情報",
+        color=target_member.color if target_member.color !=
