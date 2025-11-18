@@ -11,6 +11,7 @@ import random
 import logging
 from datetime import datetime, timedelta
 import re
+import requests # API呼び出しのためにrequestsをインポート
 
 # ログの設定
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +32,6 @@ intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 環境変数からの初期設定
-# コマンドで変更されるため、グローバル変数として定義
 try:
     GLOBAL_VC_CHANNEL_ID = int(os.environ.get("LOG_VC_CHANNEL_ID", 0))
     GLOBAL_MEMBER_CHANNEL_ID = int(os.environ.get("LOG_MEMBER_CHANNEL_ID", 0))
@@ -45,7 +45,6 @@ except ValueError:
     logging.warning("環境変数ログチャンネルIDの初期値が無効な数値です。")
 
 # ボット実行中に使用されるグローバル変数 (動的に変更される)
-# 0は無効、!=0は有効なチャンネルIDとして扱います。
 LOG_VC_CHANNEL_ID = GLOBAL_VC_CHANNEL_ID
 LOG_MEMBER_CHANNEL_ID = GLOBAL_MEMBER_CHANNEL_ID
 LOG_CONFIG_CHANNEL_ID = GLOBAL_CONFIG_CHANNEL_ID # 詳細ログとBot操作ログのメインチャンネル
@@ -67,6 +66,20 @@ REACTION_ROLE_MAP = {
 
 # --- AI応答機能のグローバル設定 ---
 AI_ENABLED_CHANNELS = set() 
+
+# --- 自動モデレーション設定 ---
+# スパム検知用データストア (メッセージ内容とタイムスタンプ)
+SPAM_HISTORY = {} # {user_id: [(content, timestamp), ...]}
+SPAM_THRESHOLD_COUNT = 3  # 5秒以内に3回
+SPAM_THRESHOLD_TIME_SECONDS = 5
+MENTION_SPAM_THRESHOLD = 5 # メンション数
+
+# NGワードリスト (小文字で定義)
+FORBIDDEN_WORDS = [
+    "f*ck", "shit", "d*mn", "c*nt", # 英語の禁止語句例
+    "死ね", "殺す", "きもい", "うざい", # 日本語の禁止語句例
+    "広告", "宣伝", "投資勧誘" # スパム/商用ワード例
+]
 
 # --- Gemini API 設定 ---
 API_KEY = ""
@@ -133,7 +146,7 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
             except discord.Forbidden:
                 logging.error(f"ログチャンネル ({log_id}) への送信権限がありません。")
 
-# --- 更新ログ送信関数 (チャンネルを引数で受け取るように修正) ---
+# --- 更新ログ送信関数 ---
 async def send_update_log(bot_instance, title, version, changes_list, target_channel: discord.TextChannel, color=discord.Color.gold()):
     """
     指定されたチャンネルにBotの更新ログを送信します。
@@ -163,11 +176,19 @@ async def send_update_log(bot_instance, title, version, changes_list, target_cha
         except discord.Forbidden:
             logging.error(f"更新ログチャンネル ({update_channel.id}) への送信権限がありません。")
 
+# Gemini APIの同期呼び出しを実行するためのヘルパー関数
+def sync_gemini_api_call(api_url, headers, payload):
+    """requestsを使用してAPIを同期的に呼び出し、レスポンスのJSONを返します。"""
+    # requestsモジュールは既にトップレベルでインポートされています
+    response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=20) # タイムアウトを20秒に設定
+    response.raise_for_status() # HTTPエラーが発生した場合に例外を発生させる
+    return response.json()
+
 # --- Gemini API 呼び出し関数 (非同期/指数バックオフ付き) ---
 async def call_gemini_api(prompt: str) -> str:
     """
     Gemini APIを呼び出し、応答テキストを取得します。
-    非同期処理と指数バックオフを実装しています。
+    非同期処理と指数バックオフ、より強固なエラー処理を実装しています。
     """
     
     payload = {
@@ -184,14 +205,18 @@ async def call_gemini_api(prompt: str) -> str:
     
     for attempt in range(MAX_RETRIES):
         try:
-            response = await bot.loop.run_in_executor(
+            logging.debug(f"API呼び出し試行 {attempt + 1}/{MAX_RETRIES}...")
+
+            # 同期処理をスレッドプールエグゼキュータで非同期に実行
+            result = await bot.loop.run_in_executor(
                 None,  # デフォルトのエグゼキュータを使用
-                lambda: __import__('requests').post(API_URL, headers=headers, data=json.dumps(payload))
+                sync_gemini_api_call,
+                API_URL,
+                headers,
+                payload
             )
             
-            response.raise_for_status() # HTTPエラーが発生した場合に例外を発生させる
-            result = response.json()
-            
+            # --- 成功時の処理 ---
             candidate = result.get('candidates', [{}])[0]
             if candidate and candidate.get('content') and candidate['content'].get('parts'):
                 text = candidate['content']['parts'][0].get('text', '応答がありませんでした。')
@@ -214,30 +239,81 @@ async def call_gemini_api(prompt: str) -> str:
                 
                 return text
 
-            return "AIからの応答を抽出できませんでした。"
+            return "AIからの応答を抽出できませんでした。（JSON形式が予期せぬものでした）"
 
-        except __import__('requests').exceptions.HTTPError as e:
-            logging.error(f"HTTPエラーが発生しました: {e.response.status_code} - {e.response.text}")
+        except requests.exceptions.HTTPError as e:
+            # 4xx (クライアントエラー) や 5xx (サーバーエラー) のHTTPエラーを捕捉
+            logging.error(f"HTTPエラーが発生しました (コード: {e.response.status_code}): {e.response.text}")
             if e.response.status_code in [400, 401, 403, 404]:
-                 return f"APIエラーが発生しました (コード: {e.response.status_code})。設定を確認してください。"
-            if attempt < MAX_RETRIES - 1:
-                delay = 2 ** attempt
-                logging.warning(f"リトライします ({attempt + 1}/{MAX_RETRIES}、{delay}秒後)...")
-                await asyncio.sleep(delay)
-            else:
-                return "APIへの接続が最大リトライ回数を超えて失敗しました。"
-        
+                 return f"APIエラーが発生しました (コード: {e.response.status_code})。設定（APIキーなど）を確認してください。"
+            # その他のHTTPエラーはリトライ
+
+        except requests.exceptions.RequestException as e:
+            # 接続エラー、DNSエラー、タイムアウトなど、requestsに関連する一般的なエラーを捕捉
+            logging.error(f"リクエストエラーが発生しました ({e.__class__.__name__}): {e}")
+            # リトライ
+
         except Exception as e:
+            # JSONデコードエラーなど、予期せぬその他のエラーを捕捉
             logging.error(f"Gemini API呼び出し中に予期せぬエラーが発生しました: {e}")
-            if attempt < MAX_RETRIES - 1:
-                delay = 2 ** attempt
-                logging.warning(f"リトライします ({attempt + 1}/{MAX_RETRIES}、{delay}秒後)...")
-                await asyncio.sleep(delay)
-            else:
-                return "Gemini APIの呼び出しに失敗しました。"
+            # リトライ
+
+        # リトライロジック
+        if attempt < MAX_RETRIES - 1:
+            delay = 2 ** attempt
+            logging.warning(f"リトライします ({attempt + 1}/{MAX_RETRIES}、{delay}秒後)...")
+            await asyncio.sleep(delay)
+        else:
+            return "APIへの接続が最大リトライ回数を超えて失敗しました。時間を置いて再度お試しください。"
     
     return "API呼び出しの最終的な試行に失敗しました。"
 
+
+# --- 自動モデレーション機能のヘルパー関数 ---
+
+def is_mention_spam(message: discord.Message) -> bool:
+    """メッセージがメンションスパムの閾値を超えているかチェックする"""
+    # ユーザーとロールへのメンションの合計数が閾値を超えているか
+    return len(message.mentions) + len(message.role_mentions) > MENTION_SPAM_THRESHOLD
+
+async def is_repeat_spam(message: discord.Message) -> bool:
+    """5秒以内に同じ内容のメッセージを3回以上繰り返しているかチェックする"""
+    user_id = message.author.id
+    now = datetime.now()
+    
+    # 履歴から古いエントリを削除 (5秒以上前のもの)
+    if user_id in SPAM_HISTORY:
+        SPAM_HISTORY[user_id] = [
+            (content, timestamp) for content, timestamp in SPAM_HISTORY[user_id] 
+            if (now - timestamp).total_seconds() < SPAM_THRESHOLD_TIME_SECONDS
+        ]
+
+    # 現在のメッセージを追加
+    content_key = message.content.strip().lower() # 大文字・小文字を区別せず、スペースを無視
+    SPAM_HISTORY.setdefault(user_id, []).append((content_key, now))
+    
+    # 同じ内容のメッセージの数をカウント
+    recent_messages = [content for content, _ in SPAM_HISTORY[user_id]]
+    
+    # 最後のメッセージと同じ内容の連続数 (厳密な繰り返しスパム検知)
+    repeat_count = 0
+    for content in reversed(recent_messages):
+        if content == content_key:
+            repeat_count += 1
+        else:
+            break
+
+    # 履歴を綺麗に保つために、カウントに関係なく、古いエントリは定期的に削除
+    # ただし、同じ内容のメッセージが連続して閾値を超えた場合にTrueを返す
+    return repeat_count >= SPAM_THRESHOLD_COUNT
+
+def contains_forbidden_word(content: str) -> str | None:
+    """メッセージがNGワードを含んでいるかチェックする。含まれている場合、そのNGワードを返す。"""
+    lower_content = content.lower().strip()
+    for word in FORBIDDEN_WORDS:
+        if word in lower_content:
+            return word
+    return None
 
 # --- イベントと同期 ---
 
@@ -272,25 +348,69 @@ async def on_ready():
         except Exception as e:
             logging.error(f"グローバル同期中にエラーが発生しました: {e}")
 
-# --- AI応答機能のメインロジック (on_message) ---
+# --- AI応答機能と自動モデレーションのメインロジック (on_message) ---
 
 @bot.event
 async def on_message(message):
-    """メッセージを受信した際の処理。AI応答チャンネルからのメッセージを処理します。"""
+    """メッセージを受信した際の処理。自動モデレーションとAI応答を処理します。"""
     
     if message.author.bot or message.guild is None or not message.content:
         await bot.process_commands(message)
         return
 
+    # ------------------------------------
+    # 1. 自動モデレーション処理 (AI応答より前に実行)
+    # ------------------------------------
+    try:
+        # A. メンションスパムの検知
+        if is_mention_spam(message):
+            await message.delete()
+            await message.channel.send(f"⚠️ {message.author.mention} メンションスパムを検知しました。メッセージが削除されました。", delete_after=5)
+            await send_log(message.guild, "❌ メンションスパム削除", f"{message.author.mention} のメッセージがメンションスパムとして削除されました。",
+                           [("チャンネル", message.channel.mention, True), ("メンション数", str(len(message.mentions) + len(message.role_mentions)), True), ("メッセージ内容", message.content, False)],
+                           discord.Color.red(), log_type="moderation")
+            return # 削除したら以降の処理を停止
+
+        # B. NGワードフィルター
+        forbidden_word = contains_forbidden_word(message.content)
+        if forbidden_word:
+            await message.delete()
+            await message.channel.send(f"🛑 {message.author.mention} NGワードの使用が検知されました。メッセージが削除されました。", delete_after=5)
+            await send_log(message.guild, "❌ NGワード削除", f"{message.author.mention} のメッセージがNGワードとして削除されました。",
+                           [("チャンネル", message.channel.mention, True), ("検知ワード", forbidden_word, True), ("メッセージ内容", message.content, False)],
+                           discord.Color.red(), log_type="moderation")
+            return # 削除したら以降の処理を停止
+
+        # C. 繰り返しスパムの検知
+        if await is_repeat_spam(message):
+            # メッセージを削除する代わりに、警告とタイムアウトを課すなど、より重い処理も可能だが、
+            # ここではシンプルにメッセージを削除
+            await message.delete()
+            await message.channel.send(f"⚠️ {message.author.mention} 繰り返しスパムを検知しました。メッセージが削除されました。", delete_after=5)
+            await send_log(message.guild, "❌ 繰り返しスパム削除", f"{message.author.mention} のメッセージが繰り返しスパムとして削除されました。",
+                           [("チャンネル", message.channel.mention, True), ("メッセージ内容", message.content, False)],
+                           discord.Color.red(), log_type="moderation")
+            return # 削除したら以降の処理を停止
+
+    except discord.Forbidden:
+        logging.warning("モデレーション失敗: Botにメッセージ削除権限がありません。")
+    except Exception as e:
+        logging.error(f"自動モデレーション処理中にエラーが発生しました: {e}")
+        
+    # ------------------------------------
+    # 2. AI応答処理 (既存ロジック)
+    # ------------------------------------
     if message.channel.id in AI_ENABLED_CHANNELS:
         try:
             typing_task = asyncio.create_task(message.channel.typing())
             logging.info(f"AI処理開始: チャンネルID {message.channel.id}, ユーザー: {message.author.name}")
             ai_response_text = await call_gemini_api(message.content)
             
+            # typingタスクを安全にキャンセル
             typing_task.cancel()
-
+            
             if len(ai_response_text) > 2000:
+                # 2000文字を超える場合は切り詰める
                 await message.reply(ai_response_text[:1990] + "...")
             else:
                 await message.reply(ai_response_text)
@@ -300,7 +420,7 @@ async def on_message(message):
         except Exception as e:
             try: typing_task.cancel()
             except: pass
-            logging.error(f"AI応答処理中にエラーが発生しました: {e}")
+            logging.error(f"AI応答処理中の外部エラーが発生しました (on_message): {e}")
             await message.channel.send("AI応答中にエラーが発生しました。時間を置いて再度お試しください。")
 
     await bot.process_commands(message)
@@ -501,6 +621,7 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_message_delete(message):
     """メッセージ削除を追跡します。"""
+    # 自動モデレーションによる削除はログに記録済みのため、ここではbot以外の自然な削除を記録
     if not LOG_CONFIG_ENABLED: return
     if message.author.bot or message.guild is None: return
     await send_log(message.guild, "メッセージ削除ログ", f"{message.author.mention} がメッセージを削除しました。 (チャンネル: {message.channel.name})",
@@ -602,7 +723,7 @@ async def help_slash(interaction: discord.Interaction):
     logging.info("Action completed: Slash Help")
 
 
-# --- Bot更新ログ送信コマンド (チャンネル選択を追加) ---
+# --- Bot更新ログ送信コマンド ---
 @bot.tree.command(name="send_update_log", description="Botの更新ログを指定チャンネルに送信します。（管理者専用）")
 @app_commands.describe(
     version="新しいバージョン番号 (例: v2.1.0)",
@@ -627,7 +748,7 @@ async def send_update_log_slash(interaction: discord.Interaction, version: str, 
             "重要アップデート",
             version,
             changes_list,
-            channel, # 引数で受け取ったチャンネルを使用
+            channel,
             discord.Color.gold()
         )
         
@@ -674,7 +795,7 @@ async def ai_channel_toggle_slash(interaction: discord.Interaction):
     )
 
 
-# --- サーバー参加・脱退ログ トグルコマンド (チャンネル選択を追加) ---
+# --- サーバー参加・脱退ログ トグルコマンド ---
 
 @bot.tree.command(name="member_log_toggle", description="サーバー参加・脱退ログを有効/無効にし、送信チャンネルを設定します。")
 @app_commands.describe(
@@ -734,7 +855,7 @@ async def member_log_toggle_slash(interaction: discord.Interaction, action: str,
     )
 
 
-# --- VCログ トグルコマンド (チャンネル選択を追加) ---
+# --- VCログ トグルコマンド ---
 
 @bot.tree.command(name="vc_log_toggle", description="VC参加・退出ログを有効/無効にし、送信チャンネルを設定します。")
 @app_commands.describe(
@@ -794,7 +915,7 @@ async def vc_log_toggle_slash(interaction: discord.Interaction, action: str, cha
     )
 
 
-# --- 詳細ログ設定コマンド (チャンネル選択を追加) ---
+# --- 詳細ログ設定コマンド ---
 
 @bot.tree.command(name="log_config", description="ユーザー、サーバー、メッセージ、リアクションの詳細ログを有効/無効にし、送信チャンネルを設定します。")
 @app_commands.describe(
