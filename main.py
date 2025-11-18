@@ -55,9 +55,10 @@ REACTION_ROLE_MAP = {
 # AI応答が有効なチャンネルIDを格納するセット
 AI_ENABLED_CHANNELS = set() 
 
-# --- VCログ、メンバーログのグローバル設定フラグ ---
+# --- VCログ、メンバーログ、詳細ログのグローバル設定フラグ ---
 LOG_VC_ENABLED = True 
 LOG_MEMBER_JOIN_LEAVE_ENABLED = True
+# LOG_CONFIG_ENABLEDが詳細ログ（メッセージ編集/削除、ロール、サーバー設定）を制御します。
 LOG_CONFIG_ENABLED = True 
 
 # --- Gemini API 設定 ---
@@ -75,9 +76,10 @@ def get_next_warn_id(user_id):
     return max([w['id'] for w in warn_history[user_id]]) + 1
 
 # ログ送信関数 (色指定を可能に)
-async def send_log(guild, title, description, fields, color=discord.Color.blue()):
+async def send_log(guild, title, description, fields, color=discord.Color.blue(), moderator=None):
     """
     指定された情報をログチャンネルに送信します。
+    moderatorが指定された場合、「Botによる操作」としてログに記録します。
     """
     if LOG_CHANNEL_ID != 0:
         if guild is not None:
@@ -92,6 +94,11 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
                 color=color,
                 timestamp=datetime.now()
             )
+            
+            # --- Bot操作ログの追加 ---
+            if moderator and LOG_CONFIG_ENABLED:
+                fields.insert(0, ("🧑‍💻 Bot操作実行者", moderator.mention, False))
+
             for name, value, inline in fields:
                 if value:
                     value_str = str(value)
@@ -104,7 +111,7 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
             except discord.Forbidden:
                 logging.error(f"ログチャンネル ({LOG_CHANNEL_ID}) への送信権限がありません。")
 
-# --- 更新ログ送信関数 (新規追加) ---
+# --- 更新ログ送信関数 ---
 async def send_update_log(bot_instance, title, version, changes_list, color=discord.Color.gold()):
     """
     指定されたチャンネルにBotの更新ログを送信します。
@@ -135,19 +142,12 @@ async def send_update_log(bot_instance, title, version, changes_list, color=disc
             logging.error(f"更新ログチャンネル ({UPDATE_LOG_CHANNEL_ID}) への送信権限がありません。")
 
 # --- Gemini API 呼び出し関数 (非同期/指数バックオフ付き) ---
-# Discord Botは非同期環境で動作するため、API呼び出しも非同期で行います。
-
 async def call_gemini_api(prompt: str) -> str:
     """
     Gemini APIを呼び出し、応答テキストを取得します。
     非同期処理と指数バックオフを実装しています。
     """
-    # aiohttpは標準ライブラリではないため、ここではfetch APIの非同期構造を模倣します。
-    # 実際にはこの環境で提供されるHTTPクライアントを使用する必要があります。
     
-    # Python環境ではrequestsやaiohttpが一般的ですが、環境に依存しないようfetchのロジックをシミュレーションします。
-    # 実際の環境では、外部ライブラリをインポートせずとも非同期HTTP通信が可能であると仮定します。
-
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         # Google Search groundingを有効にして、最新の情報を参照させる
@@ -163,6 +163,8 @@ async def call_gemini_api(prompt: str) -> str:
     for attempt in range(MAX_RETRIES):
         try:
             # 外部HTTPクライアントの非同期呼び出しをシミュレーション
+            # 注: 実際のCanvas環境では、この部分は提供されるfetch APIを使用する必要があります。
+            # Pythonの標準実行環境を想定し、requestsライブラリを使用する形を維持します。
             response = await bot.loop.run_in_executor(
                 None,  # デフォルトのエグゼキュータを使用
                 lambda: __import__('requests').post(API_URL, headers=headers, data=json.dumps(payload))
@@ -296,14 +298,14 @@ async def on_message(message):
     # 既存のコマンド処理を続けるために必要
     await bot.process_commands(message)
 
-# --- サーバー参加/脱退ログ ---
+# --- サーバー参加/脱退ログ (LOG_MEMBER_JOIN_LEAVE_ENABLED 制御) ---
 
 @bot.event
 async def on_member_join(member):
     """メンバー参加時のウェルカムメッセージを送信し、ログを記録"""
     if member.guild is None: return
 
-    # ログ送信 (新しいフラグで制御)
+    # ログ送信
     if LOG_MEMBER_JOIN_LEAVE_ENABLED:
         await send_log(
             member.guild,
@@ -333,7 +335,7 @@ async def on_member_remove(member):
     """メンバー脱退時のグッバイメッセージを送信し、ログを記録"""
     if member.guild is None: return
     
-    # ログ送信 (新しいフラグで制御)
+    # ログ送信
     if LOG_MEMBER_JOIN_LEAVE_ENABLED:
         await send_log(
             member.guild,
@@ -354,7 +356,7 @@ async def on_member_remove(member):
             try: await goodbye_channel.send(goodbye_message)
             except discord.Forbidden: pass
 
-# --- VC活動ログ ---
+# --- VC活動ログ (LOG_VC_ENABLED 制御) ---
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -387,11 +389,12 @@ async def on_voice_state_update(member, before, after):
             discord.Color.darker_grey()
         )
 
-# --- 既存の詳細ログ機能群 ---
+# --- 詳細ログ機能群 (LOG_CONFIG_ENABLED 制御) ---
 
 @bot.event
 async def on_member_update(before, after):
     """ニックネームとロールの変更を追跡します。"""
+    # ニックネームの変更はLOG_CONFIG_ENABLEDに依存
     if not LOG_CONFIG_ENABLED: return
     
     # 1. ニックネーム変更のログ
@@ -399,7 +402,7 @@ async def on_member_update(before, after):
         await send_log(after.guild, "ニックネーム変更ログ", f"{after.mention} がニックネームを変更しました。",
             [("変更前", before.nick or before.name, True), ("変更後", after.nick or after.name, True)], discord.Color.teal())
     
-    # 2. ロールの変更ログ (付与または剥奪)
+    # 2. ロールの変更ログ (付与または剥奪) --- 新規要件 ---
     if before.roles != after.roles:
         added_roles = [role for role in after.roles if role not in before.roles]
         removed_roles = [role for role in before.roles if role not in after.roles]
@@ -416,7 +419,7 @@ async def on_member_update(before, after):
 
 @bot.event
 async def on_guild_update(before, after):
-    """サーバー設定の変更を追跡します。"""
+    """サーバー設定の変更を追跡します。 --- 新規要件 ---"""
     if not LOG_CONFIG_ENABLED: return
     fields = []
     if before.name != after.name:
@@ -487,37 +490,49 @@ async def on_raw_reaction_remove(payload):
     # リアクションロール処理
     await process_reaction_role_remove(payload, guild, user)
 
-# --- その他の既存のログ (メッセージ削除/編集など) ---
+# --- メッセージ削除/編集ログ (LOG_CONFIG_ENABLED 制御に移動) ---
 
 @bot.event
 async def on_message_delete(message):
+    """メッセージ削除を追跡します。 --- 新規要件 ---"""
+    if not LOG_CONFIG_ENABLED: return
     if message.author.bot or message.guild is None: return
     await send_log(message.guild, "メッセージ削除ログ", f"{message.author.mention} がメッセージを削除しました。 (チャンネル: {message.channel.name})",
                    [("実行者", message.author.mention, True), ("削除されたメッセージ", message.content or "（埋め込み、画像など）", False)], discord.Color.blue())
 
 @bot.event
 async def on_message_edit(before, after):
+    """メッセージ編集を追跡します。 --- 新規要件 ---"""
+    if not LOG_CONFIG_ENABLED: return
     if before.author.bot or before.content == after.content or before.guild is None: return
     await send_log(before.guild, "メッセージ編集ログ", f"{before.author.mention} がメッセージを編集しました。 (チャンネル: {before.channel.name})",
                    [("実行者", before.author.mention, True), ("編集前のメッセージ", before.content, False), ("編集後のメッセージ", after.content, False)], discord.Color.gold())
 
 @bot.event
 async def on_guild_channel_create(channel):
+    # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
+    # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(channel.guild, "チャンネル作成ログ", f"チャンネルが作成されました: {channel.name}",
                    [("チャンネルタイプ", str(channel.type).split('.')[-1].capitalize(), True)], discord.Color.dark_green())
 
 @bot.event
 async def on_guild_channel_delete(channel):
+    # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
+    # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(channel.guild, "チャンネル削除ログ", f"チャンネルが削除されました: {channel.name}",
                    [("チャンネルID", str(channel.id), True)], discord.Color.dark_red())
 
 @bot.event
 async def on_guild_role_create(role):
+    # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
+    # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(role.guild, "ロール作成ログ", f"新しいロールが作成されました: {role.name}",
                    [("色", str(role.color), True)], discord.Color.light_grey())
 
 @bot.event
 async def on_guild_role_delete(role):
+    # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
+    # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(role.guild, "ロール削除ログ", f"ロールが削除されました: {role.name}",
                    [("削除されたロールID", str(role.id), True)], discord.Color.dark_grey())
 
@@ -543,7 +558,7 @@ async def help_slash(interaction: discord.Interaction):
         ("`/send_update_log <バージョン> <変更内容>`", "Botの更新ログを指定チャンネルに送信します。（管理者専用）"),
         ("`/member_log_toggle <有効/無効>`", "サーバー参加・脱退ログを切り替えます。"),
         ("`/vc_log_toggle <有効/無効>`", "🗣️ ボイスチャンネルの参加・退出ログを切り替えます。"),
-        ("`/log_config <有効/無効>`", "📜 ユーザープロフィール、サーバー設定、リアクションの詳細ログを切り替えます。"),
+        ("`/log_config <有効/無効>`", "📜 ユーザープロフィール、**メッセージ編集/削除、ロール、サーバー設定**の詳細ログを切り替えます。"),
         ("--- 管理 & モデレーション ---", "Carl-botの核となる高度な管理とモデレーション機能"),
         ("`/fakemessage <ユーザー> <内容>`", "指定ユーザーになりすましてメッセージを送信します。（Webhookを使用）"),
         ("`/warn <メンバー> <理由>`", "指定メンバーに警告を付与し、履歴に記録します。"),
@@ -568,7 +583,7 @@ async def help_slash(interaction: discord.Interaction):
     logging.info("Action completed: Slash Help")
 
 
-# --- 新規: Bot更新ログ送信コマンド ---
+# --- Bot更新ログ送信コマンド ---
 @bot.tree.command(name="send_update_log", description="Botの更新ログを指定チャンネルに送信します。（管理者専用）")
 @app_commands.describe(
     version="新しいバージョン番号 (例: v2.1.0)",
@@ -614,7 +629,7 @@ async def send_update_log_slash(interaction: discord.Interaction, version: str, 
         logging.error(f"更新ログ送信コマンド処理中にエラーが発生しました: {e}")
         await interaction.followup.send(f"❌ 更新ログの送信中にエラーが発生しました: {e}", ephemeral=True)
 
-# --- 新規: AI応答チャンネル設定コマンド ---
+# --- AI応答チャンネル設定コマンド ---
 
 @bot.tree.command(name="ai_channel_toggle", description="このチャンネルをAI応答チャンネルとして設定/解除します。")
 @commands.has_permissions(administrator=True)
@@ -753,9 +768,9 @@ async def vc_log_toggle_slash(interaction: discord.Interaction, action: str):
     )
 
 
-# --- 詳細ログ設定コマンド (VCログ、メンバーログとは独立) ---
+# --- 詳細ログ設定コマンド (LOG_CONFIG_ENABLED) ---
 
-@bot.tree.command(name="log_config", description="ユーザー、サーバー、リアクションの詳細ログを有効/無効にします。")
+@bot.tree.command(name="log_config", description="ユーザー、サーバー、メッセージ、リアクションの詳細ログを有効/無効にします。")
 @app_commands.describe(action="ログを有効にするか (enable) 無効にするか (disable)")
 @app_commands.choices(action=[
     app_commands.Choice(name="enable (有効)", value="enable"),
@@ -768,11 +783,11 @@ async def log_config_slash(interaction: discord.Interaction, action: str):
     
     if action == "enable":
         LOG_CONFIG_ENABLED = True
-        message = "✅ 詳細ログ（ユーザープロフィール、サーバー設定、リアクションなど）を**有効**にしました。"
+        message = "✅ 詳細ログ（メッセージ編集/削除、ロール、サーバー設定、Bot操作）を**有効**にしました。"
         color = discord.Color.green()
     elif action == "disable":
         LOG_CONFIG_ENABLED = False
-        message = "🚫 詳細ログ（ユーザープロフィール、サーバー設定、リアクションなど）を**無効**にしました。"
+        message = "🚫 詳細ログ（メッセージ編集/削除、ロール、サーバー設定、Bot操作）を**無効**にしました。"
         color = discord.Color.red()
     else:
         message = "エラー: 無効なアクションが指定されました。"
@@ -783,7 +798,7 @@ async def log_config_slash(interaction: discord.Interaction, action: str):
     # ログ送信
     await send_log(
         interaction.guild,
-        "詳細ログ設定変更",
+        "詳細ログ設定変更 (Log Config)",
         f"{interaction.user.display_name} が詳細ログ設定を変更しました。",
         [
             ("新しい状態", "有効" if LOG_CONFIG_ENABLED else "無効", True)
@@ -819,9 +834,11 @@ async def warn_slash(interaction: discord.Interaction, member: discord.Member, r
     total_warns = len(warn_history[member.id])
 
     await interaction.response.send_message(f"⚠️ {member.display_name} に警告を付与しました。 (警告数: **{total_warns}**) 理由: `{reason}`")
+    
+    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
     await send_log(interaction.guild, "メンバー警告ログ (Warn)", f"{member.display_name} に警告が発行されました。",
-        [("実行者", interaction.user.mention, True), ("対象ユーザー", member.mention, True), ("理由", reason, False), ("合計警告数", str(total_warns), True)],
-        discord.Color.orange())
+        [("対象ユーザー", member.mention, True), ("理由", reason, False), ("合計警告数", str(total_warns), True)],
+        discord.Color.orange(), moderator=interaction.user)
     
 @bot.tree.command(name="warns", description="指定されたメンバーの警告履歴を表示します。")
 @app_commands.describe(member="履歴を表示するメンバー")
@@ -875,9 +892,10 @@ async def unwarn_slash(interaction: discord.Interaction, member: discord.Member)
         f"現在の警告数: **{remaining_warns}**件"
     )
 
+    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
     await send_log(interaction.guild, "メンバー警告削除ログ (Unwarn)", f"{member.display_name} の警告が削除されました。",
-        [("実行者", interaction.user.mention, True), ("対象ユーザー", member.mention, True), ("削除されたID", str(removed_warn['id']), True), ("削除された理由", removed_warn['reason'], False)],
-        discord.Color.blue())
+        [("対象ユーザー", member.mention, True), ("削除されたID", str(removed_warn['id']), True), ("削除された理由", removed_warn['reason'], False)],
+        discord.Color.blue(), moderator=interaction.user)
 
 
 # --- 管理コマンド ---
@@ -904,9 +922,10 @@ async def fakemessage_slash(interaction: discord.Interaction, user: discord.Memb
         await webhook.send(content=content, username=user.display_name, avatar_url=avatar_url, wait=True)
         await interaction.followup.send(f"✅ **{user.display_name}**になりすましてメッセージを送信しました。", ephemeral=True)
         
+        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
         await send_log(interaction.guild, "💬 なりすましメッセージログ (Fake Message)", f"{interaction.user.display_name} がメッセージを偽装しました。",
-            [("実行者", interaction.user.mention, True), ("なりすましユーザー", user.mention, True), ("チャンネル", interaction.channel.mention, True), ("メッセージ内容", content, False)],
-            discord.Color.dark_magenta())
+            [("なりすましユーザー", user.mention, True), ("チャンネル", interaction.channel.mention, True), ("メッセージ内容", content, False)],
+            discord.Color.dark_magenta(), moderator=interaction.user)
 
     except discord.Forbidden:
         await interaction.followup.send("エラー: Webhookを送信する権限がありません。", ephemeral=True)
@@ -923,8 +942,11 @@ async def kick_slash(interaction: discord.Interaction, member: discord.Member, r
     try:
         await member.kick(reason=reason)
         await interaction.response.send_message(f"✅ {member.display_name} をキックしました。理由: {reason}")
+        
+        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
         await send_log(interaction.guild, "メンバーキックログ (実行)", f"{member.display_name} がキックされました。",
-                       [("実行者", interaction.user.mention, True), ("対象ユーザー", member.mention, True), ("理由", reason, False)], discord.Color.red())
+                       [("対象ユーザー", member.mention, True), ("理由", reason, False)], discord.Color.red(), moderator=interaction.user)
+                       
     except discord.Forbidden:
         await interaction.response.send_message("エラー: キックする権限がありません。", ephemeral=True)
     except Exception as e:
@@ -941,8 +963,11 @@ async def timeout_slash(interaction: discord.Interaction, member: discord.Member
     try:
         await member.timeout(duration, reason=reason)
         await interaction.response.send_message(f"⏸️ {member.display_name} に {minutes} 分間のタイムアウトを課しました。理由: {reason}")
+        
+        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
         await send_log(interaction.guild, "メンバータイムアウトログ", f"{member.display_name} がタイムアウトされました。",
-                       [("実行者", interaction.user.mention, True), ("期間", f"{minutes} 分間", True), ("理由", reason, False)], discord.Color.dark_teal())
+                       [("期間", f"{minutes} 分間", True), ("理由", reason, False)], discord.Color.dark_teal(), moderator=interaction.user)
+                       
     except discord.Forbidden:
         await interaction.response.send_message("エラー: タイムアウトを課す権限がありません。", ephemeral=True)
     except Exception as e:
@@ -955,8 +980,11 @@ async def clear_slash(interaction: discord.Interaction, count: app_commands.Rang
     await interaction.response.defer(ephemeral=True)
     try:
         deleted = await interaction.channel.purge(limit=count)
+        
+        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
         await send_log(interaction.guild, "メッセージ一括削除ログ", f"{interaction.user.display_name} がメッセージを一括削除しました。",
-                       [("実行者", interaction.user.mention, True), ("削除件数", str(len(deleted)), True)], discord.Color.dark_red())
+                       [("削除件数", str(len(deleted)), True)], discord.Color.dark_red(), moderator=interaction.user)
+                       
         await interaction.followup.send(f"✅ {len(deleted)} 件のメッセージを削除しました。", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("エラー: メッセージを管理する権限がありません。", ephemeral=True)
@@ -983,6 +1011,12 @@ async def rr_setup_slash(interaction: discord.Interaction):
     REACTION_ROLE_MSG_ID = rr_message.id
     for emoji in REACTION_ROLE_MAP.keys():
         await rr_message.add_reaction(emoji)
+        
+    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+    await send_log(interaction.guild, "リアクションロール設定 (実行)", f"{interaction.user.display_name} がリアクションロールを設定しました。",
+        [("チャンネル", interaction.channel.mention, True), ("メッセージID", str(REACTION_ROLE_MSG_ID), True)], 
+        discord.Color.purple(), moderator=interaction.user)
+
     await interaction.followup.send(f"✅ リアクションロールメッセージを送信し、設定しました。メッセージID: `{REACTION_ROLE_MSG_ID}`", ephemeral=True)
 
 
@@ -1097,6 +1131,4 @@ def home():
 def keep_alive_endpoint():
     """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
     return jsonify({"message": "Alive"}), 200
-
-
 
