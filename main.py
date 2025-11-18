@@ -30,17 +30,31 @@ intents.presences = True
 # ボットのクライアントオブジェクトを初期化
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 環境変数から設定を取得
+# 環境変数からの初期設定
+# コマンドで変更されるため、グローバル変数として定義
 try:
-    LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", 0))
+    GLOBAL_VC_CHANNEL_ID = int(os.environ.get("LOG_VC_CHANNEL_ID", 0))
+    GLOBAL_MEMBER_CHANNEL_ID = int(os.environ.get("LOG_MEMBER_CHANNEL_ID", 0))
+    GLOBAL_CONFIG_CHANNEL_ID = int(os.environ.get("LOG_CONFIG_CHANNEL_ID", 0))
     WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", 0))
-    # --- 新規追加: 更新ログチャンネルID (ユーザー指定値) ---
-    UPDATE_LOG_CHANNEL_ID = 1440402886151377077 
 except ValueError:
-    LOG_CHANNEL_ID = 0
+    GLOBAL_VC_CHANNEL_ID = 0
+    GLOBAL_MEMBER_CHANNEL_ID = 0
+    GLOBAL_CONFIG_CHANNEL_ID = 0
     WELCOME_CHANNEL_ID = 0
-    UPDATE_LOG_CHANNEL_ID = 0
-    logging.warning("環境変数 'LOG_CHANNEL_ID' または 'WELCOME_CHANNEL_ID' が無効な数値です。")
+    logging.warning("環境変数ログチャンネルIDの初期値が無効な数値です。")
+
+# ボット実行中に使用されるグローバル変数 (動的に変更される)
+# 0は無効、!=0は有効なチャンネルIDとして扱います。
+LOG_VC_CHANNEL_ID = GLOBAL_VC_CHANNEL_ID
+LOG_MEMBER_CHANNEL_ID = GLOBAL_MEMBER_CHANNEL_ID
+LOG_CONFIG_CHANNEL_ID = GLOBAL_CONFIG_CHANNEL_ID # 詳細ログとBot操作ログのメインチャンネル
+
+# フラグはIDの有無に基づいて動的に更新
+LOG_VC_ENABLED = (LOG_VC_CHANNEL_ID != 0) 
+LOG_MEMBER_JOIN_LEAVE_ENABLED = (LOG_MEMBER_CHANNEL_ID != 0)
+LOG_CONFIG_ENABLED = (LOG_CONFIG_CHANNEL_ID != 0) 
+
 
 # --- Carl-bot風 データストア (インメモリ/Bot再起動でリセット) ---
 warn_history = {} 
@@ -52,19 +66,10 @@ REACTION_ROLE_MAP = {
 }
 
 # --- AI応答機能のグローバル設定 ---
-# AI応答が有効なチャンネルIDを格納するセット
 AI_ENABLED_CHANNELS = set() 
 
-# --- VCログ、メンバーログ、詳細ログのグローバル設定フラグ ---
-LOG_VC_ENABLED = True 
-LOG_MEMBER_JOIN_LEAVE_ENABLED = True
-# LOG_CONFIG_ENABLEDが詳細ログ（メッセージ編集/削除、ロール、サーバー設定）を制御します。
-LOG_CONFIG_ENABLED = True 
-
 # --- Gemini API 設定 ---
-# APIキーはCanvasによって実行時に提供されます
 API_KEY = ""
-# 使用するモデルのAPIエンドポイント
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=" + API_KEY
 MAX_RETRIES = 5
 
@@ -75,17 +80,34 @@ def get_next_warn_id(user_id):
         return 1
     return max([w['id'] for w in warn_history[user_id]]) + 1
 
+# ログタイプに応じてチャンネルIDを取得するヘルパー関数
+def get_log_channel_id(log_type: str) -> int:
+    """ログタイプに基づいて、有効なログチャンネルIDを返します。"""
+    global LOG_VC_CHANNEL_ID, LOG_MEMBER_CHANNEL_ID, LOG_CONFIG_CHANNEL_ID
+    global LOG_VC_ENABLED, LOG_MEMBER_JOIN_LEAVE_ENABLED, LOG_CONFIG_ENABLED
+
+    if log_type == "vc" and LOG_VC_ENABLED:
+        return LOG_VC_CHANNEL_ID
+    if log_type == "member" and LOG_MEMBER_JOIN_LEAVE_ENABLED:
+        return LOG_MEMBER_CHANNEL_ID
+    # config (メッセージ編集/削除, ロール, サーバー設定) と moderation (Bot操作) は同じチャンネル
+    if (log_type == "config" or log_type == "moderation") and LOG_CONFIG_ENABLED:
+        return LOG_CONFIG_CHANNEL_ID
+    return 0
+
 # ログ送信関数 (色指定を可能に)
-async def send_log(guild, title, description, fields, color=discord.Color.blue(), moderator=None):
+async def send_log(guild, title, description, fields, color=discord.Color.blue(), moderator=None, log_type="moderation"):
     """
     指定された情報をログチャンネルに送信します。
-    moderatorが指定された場合、「Botによる操作」としてログに記録します。
+    log_type: "vc", "member", "config", "moderation"
     """
-    if LOG_CHANNEL_ID != 0:
+    log_id = get_log_channel_id(log_type)
+    
+    if log_id != 0:
         if guild is not None:
-            log_channel = guild.get_channel(LOG_CHANNEL_ID)
+            log_channel = guild.get_channel(log_id)
         else:
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            log_channel = bot.get_channel(log_id)
             
         if log_channel:
             log_embed = discord.Embed(
@@ -96,7 +118,7 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
             )
             
             # --- Bot操作ログの追加 ---
-            if moderator and LOG_CONFIG_ENABLED:
+            if moderator and LOG_CONFIG_ENABLED and log_type == "moderation":
                 fields.insert(0, ("🧑‍💻 Bot操作実行者", moderator.mention, False))
 
             for name, value, inline in fields:
@@ -109,18 +131,18 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
             try:
                 await log_channel.send(embed=log_embed)
             except discord.Forbidden:
-                logging.error(f"ログチャンネル ({LOG_CHANNEL_ID}) への送信権限がありません。")
+                logging.error(f"ログチャンネル ({log_id}) への送信権限がありません。")
 
-# --- 更新ログ送信関数 ---
-async def send_update_log(bot_instance, title, version, changes_list, color=discord.Color.gold()):
+# --- 更新ログ送信関数 (チャンネルを引数で受け取るように修正) ---
+async def send_update_log(bot_instance, title, version, changes_list, target_channel: discord.TextChannel, color=discord.Color.gold()):
     """
     指定されたチャンネルにBotの更新ログを送信します。
     """
-    if UPDATE_LOG_CHANNEL_ID == 0:
-        logging.warning("UPDATE_LOG_CHANNEL_IDが設定されていないため、更新ログは送信されません。")
+    if target_channel is None:
+        logging.warning("送信先チャンネルが指定されていません。更新ログは送信されません。")
         return
         
-    update_channel = bot_instance.get_channel(UPDATE_LOG_CHANNEL_ID)
+    update_channel = target_channel
     
     if update_channel:
         # 変更点をリストとしてフォーマット
@@ -137,9 +159,9 @@ async def send_update_log(bot_instance, title, version, changes_list, color=disc
         
         try:
             await update_channel.send(embed=update_embed)
-            logging.info(f"Bot更新ログをチャンネル {UPDATE_LOG_CHANNEL_ID} に送信しました。")
+            logging.info(f"Bot更新ログをチャンネル {update_channel.id} に送信しました。")
         except discord.Forbidden:
-            logging.error(f"更新ログチャンネル ({UPDATE_LOG_CHANNEL_ID}) への送信権限がありません。")
+            logging.error(f"更新ログチャンネル ({update_channel.id}) への送信権限がありません。")
 
 # --- Gemini API 呼び出し関数 (非同期/指数バックオフ付き) ---
 async def call_gemini_api(prompt: str) -> str:
@@ -162,9 +184,6 @@ async def call_gemini_api(prompt: str) -> str:
     
     for attempt in range(MAX_RETRIES):
         try:
-            # 外部HTTPクライアントの非同期呼び出しをシミュレーション
-            # 注: 実際のCanvas環境では、この部分は提供されるfetch APIを使用する必要があります。
-            # Pythonの標準実行環境を想定し、requestsライブラリを使用する形を維持します。
             response = await bot.loop.run_in_executor(
                 None,  # デフォルトのエグゼキュータを使用
                 lambda: __import__('requests').post(API_URL, headers=headers, data=json.dumps(payload))
@@ -259,27 +278,19 @@ async def on_ready():
 async def on_message(message):
     """メッセージを受信した際の処理。AI応答チャンネルからのメッセージを処理します。"""
     
-    # 1. ボット自身のメッセージ、DM、または空のメッセージは無視
     if message.author.bot or message.guild is None or not message.content:
         await bot.process_commands(message)
         return
 
-    # 2. AI応答が有効なチャンネルか確認
     if message.channel.id in AI_ENABLED_CHANNELS:
         try:
-            # 処理中であることを示すメッセージを送信
-            typing_task = asyncio.create_task(message.channel.typing()) # Botがタイピング中であることを示し続ける
-            
-            # APIを呼び出し、応答を待つ
+            typing_task = asyncio.create_task(message.channel.typing())
             logging.info(f"AI処理開始: チャンネルID {message.channel.id}, ユーザー: {message.author.name}")
             ai_response_text = await call_gemini_api(message.content)
             
-            typing_task.cancel() # タイピングを停止
+            typing_task.cancel()
 
-            # 応答をユーザーのメッセージに返信
-            # Discordのメッセージ長制限 (2000文字) を考慮
             if len(ai_response_text) > 2000:
-                # 2000文字を超える場合は分割して送信
                 await message.reply(ai_response_text[:1990] + "...")
             else:
                 await message.reply(ai_response_text)
@@ -287,15 +298,11 @@ async def on_message(message):
             logging.info(f"AI処理完了: チャンネルID {message.channel.id}")
 
         except Exception as e:
-            # エラー処理中もタイピング表示を停止
-            try:
-                typing_task.cancel()
-            except:
-                pass
+            try: typing_task.cancel()
+            except: pass
             logging.error(f"AI応答処理中にエラーが発生しました: {e}")
             await message.channel.send("AI応答中にエラーが発生しました。時間を置いて再度お試しください。")
 
-    # 既存のコマンド処理を続けるために必要
     await bot.process_commands(message)
 
 # --- サーバー参加/脱退ログ (LOG_MEMBER_JOIN_LEAVE_ENABLED 制御) ---
@@ -305,7 +312,7 @@ async def on_member_join(member):
     """メンバー参加時のウェルカムメッセージを送信し、ログを記録"""
     if member.guild is None: return
 
-    # ログ送信
+    # ログ送信 (log_type="member"を指定)
     if LOG_MEMBER_JOIN_LEAVE_ENABLED:
         await send_log(
             member.guild,
@@ -315,7 +322,8 @@ async def on_member_join(member):
                 ("ユーザー名", member.name, True), 
                 ("アカウント作成日", member.created_at.strftime('%Y/%m/%d %H:%M:%S'), False)
             ],
-            discord.Color.green()
+            discord.Color.green(),
+            log_type="member"
         )
     
     # ウェルカムメッセージの送信 (ログ機能とは独立して動作)
@@ -335,26 +343,16 @@ async def on_member_remove(member):
     """メンバー脱退時のグッバイメッセージを送信し、ログを記録"""
     if member.guild is None: return
     
-    # ログ送信
+    # ログ送信 (log_type="member"を指定)
     if LOG_MEMBER_JOIN_LEAVE_ENABLED:
         await send_log(
             member.guild,
             "メンバー脱退ログ",
             f"{member.mention} ({member.id}) がサーバーを去りました。",
             [("ユーザー名", member.name, True)],
-            discord.Color.orange()
+            discord.Color.orange(),
+            log_type="member"
         )
-    
-    # グッバイメッセージの送信 (ログ機能とは独立して動作)
-    if WELCOME_CHANNEL_ID != 0:
-        goodbye_channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
-        if goodbye_channel:
-            goodbye_message = (
-                f"👋 **{member.display_name}** さんがサーバーを去りました。\n"
-                f"またのご利用をお待ちしています！"
-            )
-            try: await goodbye_channel.send(goodbye_message)
-            except discord.Forbidden: pass
 
 # --- VC活動ログ (LOG_VC_ENABLED 制御) ---
 
@@ -373,7 +371,8 @@ async def on_voice_state_update(member, before, after):
                 ("VCチャンネル", after.channel.mention, True),
                 ("ユーザーID", str(member.id), True)
             ],
-            discord.Color.lighter_grey()
+            discord.Color.lighter_grey(),
+            log_type="vc"
         )
     
     # 退出 (before.channel が None でなく、after.channel が None)
@@ -386,7 +385,8 @@ async def on_voice_state_update(member, before, after):
                 ("VCチャンネル", before.channel.mention, True),
                 ("ユーザーID", str(member.id), True)
             ],
-            discord.Color.darker_grey()
+            discord.Color.darker_grey(),
+            log_type="vc"
         )
 
 # --- 詳細ログ機能群 (LOG_CONFIG_ENABLED 制御) ---
@@ -394,15 +394,16 @@ async def on_voice_state_update(member, before, after):
 @bot.event
 async def on_member_update(before, after):
     """ニックネームとロールの変更を追跡します。"""
-    # ニックネームの変更はLOG_CONFIG_ENABLEDに依存
+    # ニックネームとロールの変更はLOG_CONFIG_ENABLEDに依存 (log_type="config")
     if not LOG_CONFIG_ENABLED: return
     
     # 1. ニックネーム変更のログ
     if before.nick != after.nick:
         await send_log(after.guild, "ニックネーム変更ログ", f"{after.mention} がニックネームを変更しました。",
-            [("変更前", before.nick or before.name, True), ("変更後", after.nick or after.name, True)], discord.Color.teal())
+            [("変更前", before.nick or before.name, True), ("変更後", after.nick or after.name, True)], 
+            discord.Color.teal(), log_type="config")
     
-    # 2. ロールの変更ログ (付与または剥奪) --- 新規要件 ---
+    # 2. ロールの変更ログ (付与または剥奪) 
     if before.roles != after.roles:
         added_roles = [role for role in after.roles if role not in before.roles]
         removed_roles = [role for role in before.roles if role not in after.roles]
@@ -410,16 +411,18 @@ async def on_member_update(before, after):
         if added_roles:
             role_names = ", ".join([r.name for r in added_roles])
             await send_log(after.guild, "ロール付与ログ", f"{after.mention} に新しいロールが付与されました。",
-                [("付与されたロール", role_names, False)], discord.Color.dark_teal())
+                [("付与されたロール", role_names, False)], 
+                discord.Color.dark_teal(), log_type="config")
 
         if removed_roles:
             role_names = ", ".join([r.name for r in removed_roles])
             await send_log(after.guild, "ロール剥奪ログ", f"{after.mention} からロールが剥奪されました。",
-                [("剥奪されたロール", role_names, False)], discord.Color.dark_red())
+                [("剥奪されたロール", role_names, False)], 
+                discord.Color.dark_red(), log_type="config")
 
 @bot.event
 async def on_guild_update(before, after):
-    """サーバー設定の変更を追跡します。 --- 新規要件 ---"""
+    """サーバー設定の変更を追跡します。"""
     if not LOG_CONFIG_ENABLED: return
     fields = []
     if before.name != after.name:
@@ -429,7 +432,8 @@ async def on_guild_update(before, after):
     if before.verification_level != after.verification_level:
         fields.append(("認証レベル変更", f"**前:** {str(before.verification_level).split('.')[-1]}\n**後:** {str(after.verification_level).split('.')[-1]}", False))
     if fields:
-        await send_log(after, "🌐 サーバー設定変更ログ", "サーバーの重要な設定が変更されました。", fields, discord.Color.purple())
+        await send_log(after, "🌐 サーバー設定変更ログ", "サーバーの重要な設定が変更されました。", 
+            fields, discord.Color.purple(), log_type="config")
 
 # リアクションロールとログ
 async def process_reaction_role_add(payload, guild, member):
@@ -464,11 +468,12 @@ async def on_raw_reaction_add(payload):
     user = guild.get_member(payload.user_id)
     if not user: return
 
-    # 詳細ログが有効な場合のみ記録
+    # 詳細ログが有効な場合のみ記録 (log_type="config")
     if LOG_CONFIG_ENABLED and payload.message_id != REACTION_ROLE_MSG_ID: 
         channel = guild.get_channel(payload.channel_id)
         await send_log(guild, "👍 リアクション追加ログ", f"{user.mention} がリアクションを追加しました。",
-            [("チャンネル", channel.mention, True), ("メッセージID", str(payload.message_id), True), ("リアクション", str(payload.emoji), False)], discord.Color.green())
+            [("チャンネル", channel.mention, True), ("メッセージID", str(payload.message_id), True), ("リアクション", str(payload.emoji), False)], 
+            discord.Color.green(), log_type="config")
     
     # リアクションロール処理
     await process_reaction_role_add(payload, guild, user)
@@ -481,60 +486,63 @@ async def on_raw_reaction_remove(payload):
     user = guild.get_member(payload.user_id)
     if not user: return
     
-    # 詳細ログが有効な場合のみ記録
+    # 詳細ログが有効な場合のみ記録 (log_type="config")
     if LOG_CONFIG_ENABLED and payload.message_id != REACTION_ROLE_MSG_ID: 
         channel = guild.get_channel(payload.channel_id)
         await send_log(guild, "👎 リアクション削除ログ", f"{user.mention} がリアクションを削除しました。",
-            [("チャンネル", channel.mention, True), ("メッセージID", str(payload.message_id), True), ("リアクション", str(payload.emoji), False)], discord.Color.dark_green())
+            [("チャンネル", channel.mention, True), ("メッセージID", str(payload.message_id), True), ("リアクション", str(payload.emoji), False)], 
+            discord.Color.dark_green(), log_type="config")
         
     # リアクションロール処理
     await process_reaction_role_remove(payload, guild, user)
 
-# --- メッセージ削除/編集ログ (LOG_CONFIG_ENABLED 制御に移動) ---
+# --- メッセージ削除/編集ログ (LOG_CONFIG_ENABLED 制御) ---
 
 @bot.event
 async def on_message_delete(message):
-    """メッセージ削除を追跡します。 --- 新規要件 ---"""
+    """メッセージ削除を追跡します。"""
     if not LOG_CONFIG_ENABLED: return
     if message.author.bot or message.guild is None: return
     await send_log(message.guild, "メッセージ削除ログ", f"{message.author.mention} がメッセージを削除しました。 (チャンネル: {message.channel.name})",
-                   [("実行者", message.author.mention, True), ("削除されたメッセージ", message.content or "（埋め込み、画像など）", False)], discord.Color.blue())
+                   [("実行者", message.author.mention, True), ("削除されたメッセージ", message.content or "（埋め込み、画像など）", False)], 
+                   discord.Color.blue(), log_type="config")
 
 @bot.event
 async def on_message_edit(before, after):
-    """メッセージ編集を追跡します。 --- 新規要件 ---"""
+    """メッセージ編集を追跡します。"""
     if not LOG_CONFIG_ENABLED: return
     if before.author.bot or before.content == after.content or before.guild is None: return
     await send_log(before.guild, "メッセージ編集ログ", f"{before.author.mention} がメッセージを編集しました。 (チャンネル: {before.channel.name})",
-                   [("実行者", before.author.mention, True), ("編集前のメッセージ", before.content, False), ("編集後のメッセージ", after.content, False)], discord.Color.gold())
+                   [("実行者", before.author.mention, True), ("編集前のメッセージ", before.content, False), ("編集後のメッセージ", after.content, False)], 
+                   discord.Color.gold(), log_type="config")
 
 @bot.event
 async def on_guild_channel_create(channel):
     # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
     # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(channel.guild, "チャンネル作成ログ", f"チャンネルが作成されました: {channel.name}",
-                   [("チャンネルタイプ", str(channel.type).split('.')[-1].capitalize(), True)], discord.Color.dark_green())
+                   [("チャンネルタイプ", str(channel.type).split('.')[-1].capitalize(), True)], discord.Color.dark_green(), log_type="moderation")
 
 @bot.event
 async def on_guild_channel_delete(channel):
     # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
     # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(channel.guild, "チャンネル削除ログ", f"チャンネルが削除されました: {channel.name}",
-                   [("チャンネルID", str(channel.id), True)], discord.Color.dark_red())
+                   [("チャンネルID", str(channel.id), True)], discord.Color.dark_red(), log_type="moderation")
 
 @bot.event
 async def on_guild_role_create(role):
     # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
     # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(role.guild, "ロール作成ログ", f"新しいロールが作成されました: {role.name}",
-                   [("色", str(role.color), True)], discord.Color.light_grey())
+                   [("色", str(role.color), True)], discord.Color.light_grey(), log_type="moderation")
 
 @bot.event
 async def on_guild_role_delete(role):
     # このログは詳細ログとは切り離して常に有効にするか、トグル対象とするか検討が必要ですが、
     # 今回はLOG_CONFIG_ENABLEDの対象外として残します。
     await send_log(role.guild, "ロール削除ログ", f"ロールが削除されました: {role.name}",
-                   [("削除されたロールID", str(role.id), True)], discord.Color.dark_grey())
+                   [("削除されたロールID", str(role.id), True)], discord.Color.dark_grey(), log_type="moderation")
 
 
 # --- スラッシュコマンドの定義 ---
@@ -542,6 +550,17 @@ async def on_guild_role_delete(role):
 @bot.tree.command(name="help", description="利用可能なコマンド一覧を表示します。")
 async def help_slash(interaction: discord.Interaction):
     """コマンド一覧を表示します。"""
+    
+    def get_log_status(channel_id):
+        if channel_id != 0:
+            channel = bot.get_channel(channel_id)
+            return f"✅ 有効 (送信先: {channel.mention if channel else 'ID:' + str(channel_id)})"
+        return "🚫 無効"
+
+    vc_status = get_log_status(LOG_VC_CHANNEL_ID)
+    member_status = get_log_status(LOG_MEMBER_CHANNEL_ID)
+    config_status = get_log_status(LOG_CONFIG_CHANNEL_ID)
+
     current_ai_channels = [bot.get_channel(cid).mention for cid in AI_ENABLED_CHANNELS if bot.get_channel(cid)]
     ai_status = f"有効なチャンネル: {', '.join(current_ai_channels)}" if current_ai_channels else "現在、AI応答は無効です。"
     
@@ -554,11 +573,11 @@ async def help_slash(interaction: discord.Interaction):
     commands_list = [
         ("--- AI応答設定 (Gemini) ---", "高性能AIが質問に答えます。"),
         (f"`/ai_channel_toggle`", "このチャンネルをAI応答チャンネルとして設定/解除します。\n現在の状態: " + ai_status),
-        ("--- ログ設定 (独立したトグル) ---", "各ログ機能を独立して有効/無効に切り替えます。"),
-        ("`/send_update_log <バージョン> <変更内容>`", "Botの更新ログを指定チャンネルに送信します。（管理者専用）"),
-        ("`/member_log_toggle <有効/無効>`", "サーバー参加・脱退ログを切り替えます。"),
-        ("`/vc_log_toggle <有効/無効>`", "🗣️ ボイスチャンネルの参加・退出ログを切り替えます。"),
-        ("`/log_config <有効/無効>`", "📜 ユーザープロフィール、**メッセージ編集/削除、ロール、サーバー設定**の詳細ログを切り替えます。"),
+        ("--- ログ設定 (チャンネル選択機能付き) ---", "各ログ機能を独立して有効/無効に切り替え、送信先チャンネルを設定します。"),
+        ("`/send_update_log <バージョン> <変更内容> <チャンネル>`", "Botの更新ログを指定チャンネルに送信します。（管理者専用）"),
+        (f"`/member_log_toggle <有効/無効> [チャンネル]`", f"サーバー参加・脱退ログを切り替えます。\n現在の状態: {member_status}"),
+        (f"`/vc_log_toggle <有効/無効> [チャンネル]`", f"🗣️ ボイスチャンネルの参加・退出ログを切り替えます。\n現在の状態: {vc_status}"),
+        (f"`/log_config <有効/無効> [チャンネル]`", f"📜 詳細ログ（メッセージ、ロール、サーバー設定、Bot操作）を切り替えます。\n現在の状態: {config_status}"),
         ("--- 管理 & モデレーション ---", "Carl-botの核となる高度な管理とモデレーション機能"),
         ("`/fakemessage <ユーザー> <内容>`", "指定ユーザーになりすましてメッセージを送信します。（Webhookを使用）"),
         ("`/warn <メンバー> <理由>`", "指定メンバーに警告を付与し、履歴に記録します。"),
@@ -583,17 +602,17 @@ async def help_slash(interaction: discord.Interaction):
     logging.info("Action completed: Slash Help")
 
 
-# --- Bot更新ログ送信コマンド ---
+# --- Bot更新ログ送信コマンド (チャンネル選択を追加) ---
 @bot.tree.command(name="send_update_log", description="Botの更新ログを指定チャンネルに送信します。（管理者専用）")
 @app_commands.describe(
     version="新しいバージョン番号 (例: v2.1.0)",
-    changes="変更点をカンマ区切りで入力 (例: 機能Aを追加,機能Bを削除,バグ修正)"
+    changes="変更点をカンマ区切りで入力 (例: 機能Aを追加,機能Bを削除,バグ修正)",
+    channel="更新ログを送信するチャンネル"
 )
 @commands.has_permissions(administrator=True)
-async def send_update_log_slash(interaction: discord.Interaction, version: str, changes: str):
+async def send_update_log_slash(interaction: discord.Interaction, version: str, changes: str, channel: discord.TextChannel):
     """管理者によるBotの更新ログ送信を処理します。"""
     
-    # カンマ区切り文字列をリストに変換
     changes_list = [c.strip() for c in changes.split(',') if c.strip()]
     
     if not changes_list:
@@ -603,33 +622,26 @@ async def send_update_log_slash(interaction: discord.Interaction, version: str, 
     await interaction.response.defer(ephemeral=True)
     
     try:
-        # 更新ログを送信
         await send_update_log(
             bot,
             "重要アップデート",
             version,
             changes_list,
+            channel, # 引数で受け取ったチャンネルを使用
             discord.Color.gold()
         )
         
-        # ログ送信後のフィードバック
-        update_channel = bot.get_channel(UPDATE_LOG_CHANNEL_ID)
-        if update_channel:
-            await interaction.followup.send(
-                f"✅ 更新ログ (バージョン: **{version}**) を {update_channel.mention} に送信しました。",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                "❌ 更新ログチャンネルが見つからないか、IDが設定されていません。",
-                ephemeral=True
-            )
+        await interaction.followup.send(
+            f"✅ 更新ログ (バージョン: **{version}**) を {channel.mention} に送信しました。",
+            ephemeral=True
+        )
             
     except Exception as e:
         logging.error(f"更新ログ送信コマンド処理中にエラーが発生しました: {e}")
         await interaction.followup.send(f"❌ 更新ログの送信中にエラーが発生しました: {e}", ephemeral=True)
 
-# --- AI応答チャンネル設定コマンド ---
+
+# --- AI応答チャンネル設定コマンド (変更なし) ---
 
 @bot.tree.command(name="ai_channel_toggle", description="このチャンネルをAI応答チャンネルとして設定/解除します。")
 @commands.has_permissions(administrator=True)
@@ -649,7 +661,7 @@ async def ai_channel_toggle_slash(interaction: discord.Interaction):
         
     await interaction.response.send_message(message, ephemeral=True)
     
-    # ログ送信
+    # Bot操作ログとして記録 (log_type="moderation")
     await send_log(
         interaction.guild,
         "AI応答チャンネル設定変更",
@@ -662,148 +674,183 @@ async def ai_channel_toggle_slash(interaction: discord.Interaction):
     )
 
 
-# --- 既存: アバター表示コマンド ---
+# --- サーバー参加・脱退ログ トグルコマンド (チャンネル選択を追加) ---
 
-@bot.tree.command(name="avatar", description="指定したユーザーのアバター画像を表示します。")
-@app_commands.describe(member="アバターを表示するユーザー (省略した場合は実行者自身)")
-async def avatar_slash(interaction: discord.Interaction, member: discord.Member = None):
-    """指定ユーザーのアバター画像を表示する"""
-    user = member if member else interaction.user
-    
-    # ユーザーのアバターURLを取得 (Noneチェックとデフォルトアバター対応)
-    # size=1024で高解像度のアバターを取得
-    # .url が None になる可能性に対応するため、user.display_avatar を使用するのが最新の慣習です。
-    avatar_url = user.display_avatar.with_size(1024).url
-
-    embed = discord.Embed(
-        title=f"🖼️ {user.display_name} のアバター",
-        description=f"[高画質で開く]({avatar_url})",
-        color=discord.Color.dark_purple(),
-        timestamp=datetime.now()
-    )
-    
-    # 画像を埋め込みのメイン画像として設定
-    embed.set_image(url=avatar_url)
-    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-
-    await interaction.response.send_message(embed=embed)
-    logging.info(f"Action completed: /avatar for {user.name}")
-
-
-# --- サーバー参加・脱退ログ トグルコマンド ---
-
-@bot.tree.command(name="member_log_toggle", description="サーバー参加・脱退ログを有効/無効にします。")
-@app_commands.describe(action="ログを有効にするか (enable) 無効にするか (disable)")
+@bot.tree.command(name="member_log_toggle", description="サーバー参加・脱退ログを有効/無効にし、送信チャンネルを設定します。")
+@app_commands.describe(
+    action="ログを有効にするか (enable) 無効にするか (disable)",
+    channel="ログの送信先チャンネル (有効化時のみ任意)"
+)
 @app_commands.choices(action=[
     app_commands.Choice(name="enable (有効)", value="enable"),
     app_commands.Choice(name="disable (無効)", value="disable"),
 ])
 @commands.has_permissions(administrator=True)
-async def member_log_toggle_slash(interaction: discord.Interaction, action: str):
+async def member_log_toggle_slash(interaction: discord.Interaction, action: str, channel: discord.TextChannel = None):
     """サーバー参加・脱退ログ設定を有効または無効にします。"""
-    global LOG_MEMBER_JOIN_LEAVE_ENABLED
+    global LOG_MEMBER_JOIN_LEAVE_ENABLED, LOG_MEMBER_CHANNEL_ID
     
+    await interaction.response.defer(ephemeral=True)
+
     if action == "enable":
-        LOG_MEMBER_JOIN_LEAVE_ENABLED = True
-        message = "✅ **サーバー参加・脱退ログ**を**有効**にしました。"
-        color = discord.Color.green()
+        if channel:
+            # 新しいチャンネルを設定して有効化
+            LOG_MEMBER_CHANNEL_ID = channel.id
+            LOG_MEMBER_JOIN_LEAVE_ENABLED = True
+            message = f"✅ **サーバー参加・脱退ログ**を**有効**にしました。\n新しい送信先: {channel.mention}"
+            color = discord.Color.green()
+        elif LOG_MEMBER_CHANNEL_ID != 0:
+            # チャンネル指定なしで有効化（既存IDを使用）
+            LOG_MEMBER_JOIN_LEAVE_ENABLED = True
+            current_channel = bot.get_channel(LOG_MEMBER_CHANNEL_ID)
+            message = f"✅ **サーバー参加・脱退ログ**を**有効**にしました。(送信先: {current_channel.mention if current_channel else 'ID:' + str(LOG_MEMBER_CHANNEL_ID)})"
+            color = discord.Color.green()
+        else:
+            await interaction.followup.send("有効化するには、ログを送信するチャンネルを指定してください。", ephemeral=True)
+            return
+
     elif action == "disable":
         LOG_MEMBER_JOIN_LEAVE_ENABLED = False
+        LOG_MEMBER_CHANNEL_ID = 0 # IDをリセット
         message = "🚫 **サーバー参加・脱退ログ**を**無効**にしました。"
         color = discord.Color.red()
     else:
         message = "エラー: 無効なアクションが指定されました。"
         color = discord.Color.orange()
         
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.followup.send(message, ephemeral=True)
     
-    # ログ送信
+    # Bot操作ログとして記録 (log_type="moderation")
     await send_log(
         interaction.guild,
         "サーバー参加・脱退ログ設定変更",
         f"{interaction.user.display_name} がサーバー参加・脱退ログ設定を変更しました。",
         [
-            ("新しい状態", "有効" if LOG_MEMBER_JOIN_LEAVE_ENABLED else "無効", True)
+            ("新しい状態", "有効" if LOG_MEMBER_JOIN_LEAVE_ENABLED else "無効", True),
+            ("送信先チャンネル", channel.mention if channel else "変更なし/無効化", True)
         ],
-        color
+        color,
+        log_type="moderation"
     )
 
 
-# --- VCログ トグルコマンド ---
+# --- VCログ トグルコマンド (チャンネル選択を追加) ---
 
-@bot.tree.command(name="vc_log_toggle", description="VC参加・退出ログを有効/無効にします。")
-@app_commands.describe(action="VCログを有効にするか (enable) 無効にするか (disable)")
+@bot.tree.command(name="vc_log_toggle", description="VC参加・退出ログを有効/無効にし、送信チャンネルを設定します。")
+@app_commands.describe(
+    action="VCログを有効にするか (enable) 無効にするか (disable)",
+    channel="ログの送信先チャンネル (有効化時のみ任意)"
+)
 @app_commands.choices(action=[
     app_commands.Choice(name="enable (有効)", value="enable"),
     app_commands.Choice(name="disable (無効)", value="disable"),
 ])
 @commands.has_permissions(administrator=True)
-async def vc_log_toggle_slash(interaction: discord.Interaction, action: str):
+async def vc_log_toggle_slash(interaction: discord.Interaction, action: str, channel: discord.TextChannel = None):
     """VCログ設定を有効または無効にします。"""
-    global LOG_VC_ENABLED
+    global LOG_VC_ENABLED, LOG_VC_CHANNEL_ID
     
+    await interaction.response.defer(ephemeral=True)
+
     if action == "enable":
-        LOG_VC_ENABLED = True
-        message = "✅ **ボイスチャンネルの参加・退出ログ**を**有効**にしました。"
-        color = discord.Color.green()
+        if channel:
+            # 新しいチャンネルを設定して有効化
+            LOG_VC_CHANNEL_ID = channel.id
+            LOG_VC_ENABLED = True
+            message = f"✅ **ボイスチャンネルの参加・退出ログ**を**有効**にしました。\n新しい送信先: {channel.mention}"
+            color = discord.Color.green()
+        elif LOG_VC_CHANNEL_ID != 0:
+            # チャンネル指定なしで有効化（既存IDを使用）
+            LOG_VC_ENABLED = True
+            current_channel = bot.get_channel(LOG_VC_CHANNEL_ID)
+            message = f"✅ **ボイスチャンネルの参加・退出ログ**を**有効**にしました。(送信先: {current_channel.mention if current_channel else 'ID:' + str(LOG_VC_CHANNEL_ID)})"
+            color = discord.Color.green()
+        else:
+            await interaction.followup.send("有効化するには、ログを送信するチャンネルを指定してください。", ephemeral=True)
+            return
+
     elif action == "disable":
         LOG_VC_ENABLED = False
+        LOG_VC_CHANNEL_ID = 0 # IDをリセット
         message = "🚫 **ボイスチャンネルの参加・退出ログ**を**無効**にしました。"
         color = discord.Color.red()
     else:
         message = "エラー: 無効なアクションが指定されました。"
         color = discord.Color.orange()
         
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.followup.send(message, ephemeral=True)
     
-    # ログ送信
+    # Bot操作ログとして記録 (log_type="moderation")
     await send_log(
         interaction.guild,
         "VCログ設定変更",
         f"{interaction.user.display_name} がVCログ設定を変更しました。",
         [
-            ("新しい状態", "有効" if LOG_VC_ENABLED else "無効", True)
+            ("新しい状態", "有効" if LOG_VC_ENABLED else "無効", True),
+            ("送信先チャンネル", channel.mention if channel else "変更なし/無効化", True)
         ],
-        color
+        color,
+        log_type="moderation"
     )
 
 
-# --- 詳細ログ設定コマンド (LOG_CONFIG_ENABLED) ---
+# --- 詳細ログ設定コマンド (チャンネル選択を追加) ---
 
-@bot.tree.command(name="log_config", description="ユーザー、サーバー、メッセージ、リアクションの詳細ログを有効/無効にします。")
-@app_commands.describe(action="ログを有効にするか (enable) 無効にするか (disable)")
+@bot.tree.command(name="log_config", description="ユーザー、サーバー、メッセージ、リアクションの詳細ログを有効/無効にし、送信チャンネルを設定します。")
+@app_commands.describe(
+    action="ログを有効にするか (enable) 無効にするか (disable)",
+    channel="ログの送信先チャンネル (有効化時のみ任意)"
+)
 @app_commands.choices(action=[
     app_commands.Choice(name="enable (有効)", value="enable"),
     app_commands.Choice(name="disable (無効)", value="disable"),
 ])
 @commands.has_permissions(administrator=True)
-async def log_config_slash(interaction: discord.Interaction, action: str):
+async def log_config_slash(interaction: discord.Interaction, action: str, channel: discord.TextChannel = None):
     """詳細ログ設定を有効または無効にします。"""
-    global LOG_CONFIG_ENABLED
+    global LOG_CONFIG_ENABLED, LOG_CONFIG_CHANNEL_ID
     
+    await interaction.response.defer(ephemeral=True)
+
     if action == "enable":
-        LOG_CONFIG_ENABLED = True
-        message = "✅ 詳細ログ（メッセージ編集/削除、ロール、サーバー設定、Bot操作）を**有効**にしました。"
-        color = discord.Color.green()
+        if channel:
+            # 新しいチャンネルを設定して有効化
+            LOG_CONFIG_CHANNEL_ID = channel.id
+            LOG_CONFIG_ENABLED = True
+            message = f"✅ 詳細ログ（メッセージ編集/削除、ロール、サーバー設定、Bot操作）を**有効**にしました。\n新しい送信先: {channel.mention}"
+            color = discord.Color.green()
+        elif LOG_CONFIG_CHANNEL_ID != 0:
+            # チャンネル指定なしで有効化（既存IDを使用）
+            LOG_CONFIG_ENABLED = True
+            current_channel = bot.get_channel(LOG_CONFIG_CHANNEL_ID)
+            message = f"✅ 詳細ログ（...）を**有効**にしました。(送信先: {current_channel.mention if current_channel else 'ID:' + str(LOG_CONFIG_CHANNEL_ID)})"
+            color = discord.Color.green()
+        else:
+            await interaction.followup.send("有効化するには、ログを送信するチャンネルを指定してください。", ephemeral=True)
+            return
+
     elif action == "disable":
         LOG_CONFIG_ENABLED = False
+        LOG_CONFIG_CHANNEL_ID = 0 # IDをリセット
         message = "🚫 詳細ログ（メッセージ編集/削除、ロール、サーバー設定、Bot操作）を**無効**にしました。"
         color = discord.Color.red()
     else:
         message = "エラー: 無効なアクションが指定されました。"
         color = discord.Color.orange()
         
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.followup.send(message, ephemeral=True)
     
-    # ログ送信
+    # Bot操作ログとして記録 (log_type="moderation")
     await send_log(
         interaction.guild,
         "詳細ログ設定変更 (Log Config)",
         f"{interaction.user.display_name} が詳細ログ設定を変更しました。",
         [
-            ("新しい状態", "有効" if LOG_CONFIG_ENABLED else "無効", True)
+            ("新しい状態", "有効" if LOG_CONFIG_ENABLED else "無効", True),
+            ("送信先チャンネル", channel.mention if channel else "変更なし/無効化", True)
         ],
-        color
+        color,
+        log_type="moderation"
     )
 
 # --- Carl-bot風 警告システムコマンド ---
@@ -835,10 +882,10 @@ async def warn_slash(interaction: discord.Interaction, member: discord.Member, r
 
     await interaction.response.send_message(f"⚠️ {member.display_name} に警告を付与しました。 (警告数: **{total_warns}**) 理由: `{reason}`")
     
-    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+    # Botによる操作ログとして記録 (log_type="moderation")
     await send_log(interaction.guild, "メンバー警告ログ (Warn)", f"{member.display_name} に警告が発行されました。",
         [("対象ユーザー", member.mention, True), ("理由", reason, False), ("合計警告数", str(total_warns), True)],
-        discord.Color.orange(), moderator=interaction.user)
+        discord.Color.orange(), moderator=interaction.user, log_type="moderation")
     
 @bot.tree.command(name="warns", description="指定されたメンバーの警告履歴を表示します。")
 @app_commands.describe(member="履歴を表示するメンバー")
@@ -892,10 +939,10 @@ async def unwarn_slash(interaction: discord.Interaction, member: discord.Member)
         f"現在の警告数: **{remaining_warns}**件"
     )
 
-    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+    # Botによる操作ログとして記録 (log_type="moderation")
     await send_log(interaction.guild, "メンバー警告削除ログ (Unwarn)", f"{member.display_name} の警告が削除されました。",
         [("対象ユーザー", member.mention, True), ("削除されたID", str(removed_warn['id']), True), ("削除された理由", removed_warn['reason'], False)],
-        discord.Color.blue(), moderator=interaction.user)
+        discord.Color.blue(), moderator=interaction.user, log_type="moderation")
 
 
 # --- 管理コマンド ---
@@ -922,10 +969,10 @@ async def fakemessage_slash(interaction: discord.Interaction, user: discord.Memb
         await webhook.send(content=content, username=user.display_name, avatar_url=avatar_url, wait=True)
         await interaction.followup.send(f"✅ **{user.display_name}**になりすましてメッセージを送信しました。", ephemeral=True)
         
-        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+        # Botによる操作ログとして記録 (log_type="moderation")
         await send_log(interaction.guild, "💬 なりすましメッセージログ (Fake Message)", f"{interaction.user.display_name} がメッセージを偽装しました。",
             [("なりすましユーザー", user.mention, True), ("チャンネル", interaction.channel.mention, True), ("メッセージ内容", content, False)],
-            discord.Color.dark_magenta(), moderator=interaction.user)
+            discord.Color.dark_magenta(), moderator=interaction.user, log_type="moderation")
 
     except discord.Forbidden:
         await interaction.followup.send("エラー: Webhookを送信する権限がありません。", ephemeral=True)
@@ -943,9 +990,10 @@ async def kick_slash(interaction: discord.Interaction, member: discord.Member, r
         await member.kick(reason=reason)
         await interaction.response.send_message(f"✅ {member.display_name} をキックしました。理由: {reason}")
         
-        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+        # Botによる操作ログとして記録 (log_type="moderation")
         await send_log(interaction.guild, "メンバーキックログ (実行)", f"{member.display_name} がキックされました。",
-                       [("対象ユーザー", member.mention, True), ("理由", reason, False)], discord.Color.red(), moderator=interaction.user)
+                       [("対象ユーザー", member.mention, True), ("理由", reason, False)], 
+                       discord.Color.red(), moderator=interaction.user, log_type="moderation")
                        
     except discord.Forbidden:
         await interaction.response.send_message("エラー: キックする権限がありません。", ephemeral=True)
@@ -964,9 +1012,10 @@ async def timeout_slash(interaction: discord.Interaction, member: discord.Member
         await member.timeout(duration, reason=reason)
         await interaction.response.send_message(f"⏸️ {member.display_name} に {minutes} 分間のタイムアウトを課しました。理由: {reason}")
         
-        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+        # Botによる操作ログとして記録 (log_type="moderation")
         await send_log(interaction.guild, "メンバータイムアウトログ", f"{member.display_name} がタイムアウトされました。",
-                       [("期間", f"{minutes} 分間", True), ("理由", reason, False)], discord.Color.dark_teal(), moderator=interaction.user)
+                       [("期間", f"{minutes} 分間", True), ("理由", reason, False)], 
+                       discord.Color.dark_teal(), moderator=interaction.user, log_type="moderation")
                        
     except discord.Forbidden:
         await interaction.response.send_message("エラー: タイムアウトを課す権限がありません。", ephemeral=True)
@@ -981,9 +1030,10 @@ async def clear_slash(interaction: discord.Interaction, count: app_commands.Rang
     try:
         deleted = await interaction.channel.purge(limit=count)
         
-        # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+        # Botによる操作ログとして記録 (log_type="moderation")
         await send_log(interaction.guild, "メッセージ一括削除ログ", f"{interaction.user.display_name} がメッセージを一括削除しました。",
-                       [("削除件数", str(len(deleted)), True)], discord.Color.dark_red(), moderator=interaction.user)
+                       [("削除件数", str(len(deleted)), True)], 
+                       discord.Color.dark_red(), moderator=interaction.user, log_type="moderation")
                        
         await interaction.followup.send(f"✅ {len(deleted)} 件のメッセージを削除しました。", ephemeral=True)
     except discord.Forbidden:
@@ -1012,10 +1062,10 @@ async def rr_setup_slash(interaction: discord.Interaction):
     for emoji in REACTION_ROLE_MAP.keys():
         await rr_message.add_reaction(emoji)
         
-    # Botによる操作ログとして記録 (moderator=interaction.userを追加)
+    # Botによる操作ログとして記録 (log_type="moderation")
     await send_log(interaction.guild, "リアクションロール設定 (実行)", f"{interaction.user.display_name} がリアクションロールを設定しました。",
         [("チャンネル", interaction.channel.mention, True), ("メッセージID", str(REACTION_ROLE_MSG_ID), True)], 
-        discord.Color.purple(), moderator=interaction.user)
+        discord.Color.purple(), moderator=interaction.user, log_type="moderation")
 
     await interaction.followup.send(f"✅ リアクションロールメッセージを送信し、設定しました。メッセージID: `{REACTION_ROLE_MSG_ID}`", ephemeral=True)
 
