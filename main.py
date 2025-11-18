@@ -77,7 +77,11 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
             )
             for name, value, inline in fields:
                 if value:
-                    log_embed.add_field(name=name, value=value, inline=inline)
+                    # Discord Embedのフィールド値の文字数制限に配慮
+                    value_str = str(value)
+                    if len(value_str) > 1024:
+                        value_str = value_str[:1020] + "..."
+                    log_embed.add_field(name=name, value=value_str, inline=inline)
             
             try:
                 await log_channel.send(embed=log_embed)
@@ -89,9 +93,11 @@ async def send_log(guild, title, description, fields, color=discord.Color.blue()
 @bot.event
 async def on_ready():
     """ボット起動時に実行される処理。スラッシュコマンドの同期を行います。"""
+    
+    # 🚨 修正点: ここでアクティビティを「るる制作をプレイ中」に変更します 🚨
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game(name="/help | Carl-bot風 多機能 Bot")
+        activity=discord.Game(name="るる制作 | /help") # アクティビティ名を変更
     )
     logging.info("Bot is ready!")
     
@@ -180,7 +186,7 @@ async def on_member_remove(member):
             except discord.Forbidden:
                 pass # ログ記録済み
 
-# --- Carl-bot風 詳細ログの維持 (以前のバージョンから継承) ---
+# --- Carl-bot風 詳細ログの維持 ---
 
 @bot.event
 async def on_message_delete(message):
@@ -251,10 +257,11 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# --- スラッシュコマンドの定義 (省略 - 変更なし) ---
+# --- スラッシュコマンドの定義 ---
 
 @bot.tree.command(name="help", description="利用可能なコマンド一覧を表示します。")
 async def help_slash(interaction: discord.Interaction):
+    """コマンド一覧を表示します。"""
     embed = discord.Embed(
         title="🤖 Botコマンドヘルプ (Carl-bot風)",
         description="モデレーションとコミュニティ機能が充実しています。",
@@ -262,16 +269,18 @@ async def help_slash(interaction: discord.Interaction):
     )
 
     commands_list = [
-        ("--- モデレーション ---", "Carl-botの核となるモデレーション機能"),
+        ("--- 管理 & モデレーション ---", "Carl-botの核となる高度な管理とモデレーション機能"),
+        ("`/fakemessage <ユーザー> <内容>`", "指定ユーザーになりすましてメッセージを送信します。（Webhookを使用）"),
         ("`/warn <メンバー> <理由>`", "指定メンバーに警告を付与し、履歴に記録します。"),
         ("`/warns <メンバー>`", "指定メンバーの警告履歴を一覧表示します。"),
         ("`/unwarn <メンバー>`", "指定メンバーの最新の警告を1つ削除します。"),
         ("`/timeout <メンバー> <分>`", "メンバーに一時的なタイムアウトを課します。"),
         ("`/kick <メンバー> <理由>`", "メンバーをキックします。"),
         ("`/clear <件数>`", "メッセージを一括削除します。"),
-        ("--- コミュニティ＆ユーティリティ ---", "エンゲージメントと情報表示"),
+        ("--- コミュニティ & ユーティリティ ---", "エンゲージメントと情報表示"),
         ("`/rr_setup`", "リアクションロールの設定メッセージを送信します。"),
         ("`/poll <質問> <選択肢>`", "簡易投票を作成します。"),
+        ("`/guess`", "数字を当てるゲームを開始します。"),
         ("`/info`", "ユーザーの詳細情報を表示します。"),
         ("`/serverstatus`", "サーバーの統計情報を表示します。"),
         ("`/ping`", "Botの遅延を計算します。"),
@@ -403,6 +412,65 @@ async def unwarn_slash(interaction: discord.Interaction, member: discord.Member)
     )
 
 
+# --- 管理コマンド ---
+
+@bot.tree.command(name="fakemessage", description="指定ユーザーになりすましてメッセージを送信します (Webhookを使用)。")
+@app_commands.describe(user="なりすますユーザー", content="送信するメッセージ内容")
+@commands.has_permissions(manage_webhooks=True) # Webhook管理権限が必要
+async def fakemessage_slash(interaction: discord.Interaction, user: discord.Member, content: str):
+    """Webhookを使用して、指定したユーザーになりすましてメッセージを送信します。"""
+    await interaction.response.defer(ephemeral=True)
+    
+    # 1. Webhookの取得または作成
+    # チャンネル内の既存のWebhookを検索
+    webhooks = await interaction.channel.webhooks()
+    webhook_name = "FakeMessageBotWebhook"
+    webhook = discord.utils.get(webhooks, name=webhook_name)
+    
+    # Webhookが存在しない場合、作成する
+    if webhook is None:
+        try:
+            webhook = await interaction.channel.create_webhook(
+                name=webhook_name, 
+                reason="`/fakemessage`コマンド用のWebhook作成"
+            )
+        except discord.Forbidden:
+            await interaction.followup.send("エラー: Webhookを作成または管理する権限がありません。", ephemeral=True)
+            return
+
+    # 2. Webhookの実行
+    try:
+        # なりすましユーザーのアバターURLを取得
+        avatar_url = user.avatar.url if user.avatar else user.default_avatar.url
+        
+        await webhook.send(
+            content=content,
+            username=user.display_name,
+            avatar_url=avatar_url,
+            wait=True # メッセージが送信されるのを待つ
+        )
+        await interaction.followup.send(f"✅ **{user.display_name}**になりすましてメッセージを送信しました。", ephemeral=True)
+        
+        # 3. ログの送信
+        await send_log(
+            interaction.guild,
+            "💬 なりすましメッセージログ (Fake Message)",
+            f"{interaction.user.display_name} がメッセージを偽装しました。",
+            [
+                ("実行者", interaction.user.mention, True),
+                ("なりすましユーザー", user.mention, True),
+                ("チャンネル", interaction.channel.mention, True),
+                ("メッセージ内容", content, False)
+            ],
+            discord.Color.dark_magenta()
+        )
+
+    except discord.Forbidden:
+        await interaction.followup.send("エラー: Webhookを送信する権限がありません。", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"予期せぬエラーが発生しました: {e}", ephemeral=True)
+
+
 # --- 既存モデレーションコマンドの維持 (機能は以前のバージョンと同じ) ---
 
 @bot.tree.command(name="kick", description="指定されたメンバーをサーバーからキックします。")
@@ -516,6 +584,96 @@ async def on_raw_reaction_remove(payload):
             try: await member.remove_roles(role_to_remove)
             except discord.Forbidden: logging.warning(f"Failed to remove role {role_to_remove.name}: Missing permissions.")
 
+# --- ユーティリティ/エンゲージメントコマンド (簡易実装) ---
+
+@bot.tree.command(name="poll", description="簡易投票を作成します。")
+@app_commands.describe(question="投票の質問", options="選択肢をカンマ区切りで入力 (例: A, B, C)")
+async def poll_slash(interaction: discord.Interaction, question: str, options: str):
+    """簡易投票を作成します。"""
+    options_list = [opt.strip() for opt in options.split(',')]
+    if len(options_list) < 2 or len(options_list) > 10:
+        await interaction.response.send_message("選択肢は2つ以上10個以下にしてください。", ephemeral=True)
+        return
+
+    emoji_map = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    poll_content = "\n".join([f"{emoji_map[i]} {opt}" for i, opt in enumerate(options_list)])
+    
+    embed = discord.Embed(
+        title=f"🗳️ 投票: {question}",
+        description=poll_content,
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed)
+    # リアクションを追加するためにメッセージを取得し直す
+    response_msg = await interaction.original_response()
+    for i in range(len(options_list)):
+        await response_msg.add_reaction(emoji_map[i])
+
+@bot.tree.command(name="guess", description="1から100までの数字を当てるゲームを開始します。")
+async def guess_slash(interaction: discord.Interaction):
+    """1から100までの数字を当てるゲームを開始します。"""
+    await interaction.response.send_message("現在、`/guess` ゲーム機能はメンテナンス中です。近日中に実装予定です！", ephemeral=True)
+
+@bot.tree.command(name="ping", description="Botの現在の応答速度（Ping値）を計測します。")
+async def ping_slash(interaction: discord.Interaction):
+    """Botの遅延を計算します。"""
+    latency_ms = round(bot.latency * 1000)
+    await interaction.response.send_message(f"🏓 Pong! Botの遅延: **{latency_ms}ms**", ephemeral=True)
+
+@bot.tree.command(name="info", description="特定のユーザーの詳細情報を表示します。")
+@app_commands.describe(member="情報を表示するユーザー (省略可)")
+async def info_slash(interaction: discord.Interaction, member: discord.Member = None):
+    """ユーザーの詳細情報を表示します。"""
+    user = member if member else interaction.user
+    
+    embed = discord.Embed(
+        title=f"👤 {user.display_name} の情報",
+        color=user.color if user.color != discord.Color.default() else discord.Color.greyple(),
+        timestamp=datetime.now()
+    )
+    embed.set_thumbnail(url=user.avatar.url if user.avatar else user.default_avatar.url)
+    
+    embed.add_field(name="ID", value=user.id, inline=True)
+    embed.add_field(name="作成日", value=user.created_at.strftime("%Y/%m/%d %H:%M"), inline=True)
+    embed.add_field(name="サーバー参加日", value=user.joined_at.strftime("%Y/%m/%d %H:%M") if user.joined_at else "N/A", inline=True)
+    
+    # ユーザーの役職一覧を取得し、カンマ区切りで表示
+    roles = [role.name for role in user.roles if role.name != "@everyone"]
+    roles_str = ", ".join(roles) if roles else "役職なし"
+    embed.add_field(name="主な役職", value=user.top_role.name, inline=True)
+    embed.add_field(name="全役職数", value=str(len(user.roles) - 1), inline=True)
+    embed.add_field(name="ニックネーム", value=user.nick if user.nick else "N/A", inline=True)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="serverstatus", description="サーバーの統計情報を表示します。")
+async def serverstatus_slash(interaction: discord.Interaction):
+    """サーバーの統計情報を表示します。"""
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("このコマンドはサーバー内でのみ実行できます。", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"📊 {guild.name} のサーバー統計",
+        color=discord.Color.dark_blue(),
+        timestamp=datetime.now()
+    )
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    
+    text_channels = len(guild.text_channels)
+    voice_channels = len(guild.voice_channels)
+    
+    embed.add_field(name="オーナー", value=guild.owner.mention if guild.owner else "不明", inline=True)
+    embed.add_field(name="作成日", value=guild.created_at.strftime("%Y/%m/%d %H:%M"), inline=True)
+    embed.add_field(name="メンバー数", value=f"{guild.member_count} 人", inline=True)
+    embed.add_field(name="チャンネル数", value=f"テキスト: {text_channels}, VC: {voice_channels}", inline=True)
+    embed.add_field(name="役職数", value=str(len(guild.roles)), inline=True)
+    embed.add_field(name="ブーストレベル", value=f"Level {guild.premium_tier} ({guild.premium_subscription_count} ブースト)", inline=True)
+    
+    await interaction.response.send_message(embed=embed)
+
+
 # --- KeepAlive Server & Main Execution (Render安定化) ---
 
 def start_bot():
@@ -551,5 +709,4 @@ def home():
 def keep_alive_endpoint():
     """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
     return jsonify({"message": "Alive"}), 200
-
 
