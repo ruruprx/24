@@ -313,10 +313,12 @@ def contains_forbidden_word(content: str) -> str | None:
 @bot.event
 async def on_ready():
     """ボット起動時に実行される処理。スラッシュコマンドの同期を行います。"""
+    # --- 修正箇所: ステータスを "/help" に変更 ---
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game(name="AI応答 & ログ管理 | /help")
+        activity=discord.Game(name="/help")
     )
+    # ---------------------------------------------
     logging.info("Bot is ready!")
     
     # スラッシュコマンドの同期 (既存ロジック)
@@ -395,14 +397,14 @@ async def on_message(message):
     # ------------------------------------
     if message.channel.id in AI_ENABLED_CHANNELS:
         try:
-            typing_task = asyncio.create_task(message.channel.typing())
-            logging.info(f"AI処理開始: チャンネルID {message.channel.id}, ユーザー: {message.author.name}")
-            # 🌟 Venice AI の呼び出し
-            ai_response_text = await call_venice_api(message.content)
+            # 🌟 修正箇所: async with を使用して、安全にタイピングインジケータを開始・終了します
+            async with message.channel.typing():
+                logging.info(f"AI処理開始: チャンネルID {message.channel.id}, ユーザー: {message.author.name}")
+                # Venice AI の呼び出し
+                ai_response_text = await call_venice_api(message.content)
             
-            # typingタスクを安全にキャンセル
-            typing_task.cancel()
-            
+            # async with ブロックを抜けると、タイピングは自動的に停止される
+
             if len(ai_response_text) > 2000:
                 # 2000文字を超える場合は切り詰める
                 await message.reply(ai_response_text[:1990] + "...")
@@ -412,8 +414,7 @@ async def on_message(message):
             logging.info(f"AI処理完了: チャンネルID {message.channel.id}")
 
         except Exception as e:
-            try: typing_task.cancel()
-            except: pass
+            # 例外が発生した場合も async with ブロックは安全に終了する
             logging.error(f"AI応答処理中の外部エラーが発生しました (on_message): {e}")
             await message.channel.send("AI応答中にエラーが発生しました。時間を置いて再度お試しください。")
 
@@ -1296,4 +1297,3 @@ def home():
 def keep_alive_endpoint():
     """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
     return jsonify({"message": "Alive"}), 200
-
