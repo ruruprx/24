@@ -81,10 +81,13 @@ FORBIDDEN_WORDS = [
     "広告", "宣伝", "投資勧誘" # スパム/商用ワード例
 ]
 
-# --- Gemini API 設定 ---
-API_KEY = ""
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=" + API_KEY
-MAX_RETRIES = 5
+# --- 🌟 Venice AI API 設定 🌟 ---
+# 環境変数 VENICE_API_KEY からキーを読み込むことを推奨
+VENICE_API_KEY = os.environ.get("VENICE_API_KEY", os.environ.get("API_KEY", "")) 
+VENICE_API_URL = "https://api.venice.ai/v1/chat/completions" # Venice AIの互換エンドポイント
+VENICE_MODEL = "v-deepseek-70b" # 利用したいVenice AIのモデル名
+MAX_RETRIES = 5                  # リトライ回数はそのまま維持
+
 
 # --- 警告システム用ヘルパー関数 ---
 def get_next_warn_id(user_id):
@@ -176,7 +179,7 @@ async def send_update_log(bot_instance, title, version, changes_list, target_cha
         except discord.Forbidden:
             logging.error(f"更新ログチャンネル ({update_channel.id}) への送信権限がありません。")
 
-# Gemini APIの同期呼び出しを実行するためのヘルパー関数
+# 同期API呼び出しのヘルパー関数 (Venice/OpenAI互換)
 def sync_gemini_api_call(api_url, headers, payload):
     """requestsを使用してAPIを同期的に呼び出し、レスポンスのJSONを返します。"""
     # requestsモジュールは既にトップレベルでインポートされています
@@ -184,24 +187,35 @@ def sync_gemini_api_call(api_url, headers, payload):
     response.raise_for_status() # HTTPエラーが発生した場合に例外を発生させる
     return response.json()
 
-# --- Gemini API 呼び出し関数 (非同期/指数バックオフ付き) ---
-async def call_gemini_api(prompt: str) -> str:
+# --- 🌟 Venice AI 呼び出し関数 (非同期/指数バックオフ付き) 🌟 ---
+async def call_venice_api(prompt: str) -> str:
     """
-    Gemini APIを呼び出し、応答テキストを取得します。
-    非同期処理と指数バックオフ、より強固なエラー処理を実装しています。
+    Venice AI Chat Completions APIを呼び出し、応答テキストを取得します。
+    OpenAI互換の形式を使用します。
     """
+    global VENICE_API_KEY, VENICE_API_URL, VENICE_MODEL
     
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        # Google Search groundingを有効にして、最新の情報を参照させる
-        "tools": [{"google_search": {} }],
-        # 日本語での応答を促すシステムインストラクション
-        "systemInstruction": {
-            "parts": [{"text": "あなたはフレンドリーで親切なDiscordボットです。日本語で、質問に対して正確かつ有用な情報を提供します。"}],
-        },
+    if not VENICE_API_KEY:
+        return "エラー: Venice AI APIキーが設定されていません。環境変数をご確認ください。"
+
+    # ヘッダー (OpenAI互換)
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {VENICE_API_KEY}'
     }
 
-    headers = {'Content-Type': 'application/json'}
+    # OpenAI互換のChat Completions APIペイロード
+    payload = {
+        "model": VENICE_MODEL,
+        "messages": [
+            # システムインストラクション
+            {"role": "system", "content": "あなたはフレンドリーで親切なDiscordボットです。日本語で、質問に対して正確かつ有用な情報を提供します。"},
+            # ユーザーのプロンプト
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1500
+    }
     
     for attempt in range(MAX_RETRIES):
         try:
@@ -210,33 +224,15 @@ async def call_gemini_api(prompt: str) -> str:
             # 同期処理をスレッドプールエグゼキュータで非同期に実行
             result = await bot.loop.run_in_executor(
                 None,  # デフォルトのエグゼキュータを使用
-                sync_gemini_api_call,
-                API_URL,
+                sync_gemini_api_call, # requestsによるPOST呼び出し関数を流用
+                VENICE_API_URL,
                 headers,
                 payload
             )
             
-            # --- 成功時の処理 ---
-            candidate = result.get('candidates', [{}])[0]
-            if candidate and candidate.get('content') and candidate['content'].get('parts'):
-                text = candidate['content']['parts'][0].get('text', '応答がありませんでした。')
-                
-                # 接地情報（ソース）の抽出
-                sources = []
-                grounding_metadata = candidate.get('groundingMetadata')
-                if grounding_metadata and grounding_metadata.get('groundingAttributions'):
-                    sources = grounding_metadata['groundingAttributions']
-                
-                source_links = []
-                for source in sources:
-                    uri = source.get('web', {}).get('uri')
-                    title = source.get('web', {}).get('title', 'リンク')
-                    if uri:
-                        source_links.append(f"[[{title}]({uri})]")
-                
-                if source_links:
-                    text += "\n\n--- 参照元 ---\n" + " | ".join(source_links)
-                
+            # --- 成功時の処理: OpenAI互換レスポンスのパース ---
+            if result.get('choices'):
+                text = result['choices'][0]['message']['content']
                 return text
 
             return "AIからの応答を抽出できませんでした。（JSON形式が予期せぬものでした）"
@@ -245,18 +241,15 @@ async def call_gemini_api(prompt: str) -> str:
             # 4xx (クライアントエラー) や 5xx (サーバーエラー) のHTTPエラーを捕捉
             logging.error(f"HTTPエラーが発生しました (コード: {e.response.status_code}): {e.response.text}")
             if e.response.status_code in [400, 401, 403, 404]:
-                 return f"APIエラーが発生しました (コード: {e.response.status_code})。設定（APIキーなど）を確認してください。"
-            # その他のHTTPエラーはリトライ
+                 return f"APIエラーが発生しました (コード: {e.response.status_code})。Venice AI APIキーやモデル名を確認してください。"
 
         except requests.exceptions.RequestException as e:
             # 接続エラー、DNSエラー、タイムアウトなど、requestsに関連する一般的なエラーを捕捉
             logging.error(f"リクエストエラーが発生しました ({e.__class__.__name__}): {e}")
-            # リトライ
 
         except Exception as e:
             # JSONデコードエラーなど、予期せぬその他のエラーを捕捉
-            logging.error(f"Gemini API呼び出し中に予期せぬエラーが発生しました: {e}")
-            # リトライ
+            logging.error(f"Venice AI API呼び出し中に予期せぬエラーが発生しました: {e}")
 
         # リトライロジック
         if attempt < MAX_RETRIES - 1:
@@ -398,13 +391,14 @@ async def on_message(message):
         logging.error(f"自動モデレーション処理中にエラーが発生しました: {e}")
         
     # ------------------------------------
-    # 2. AI応答処理 (既存ロジック)
+    # 2. AI応答処理
     # ------------------------------------
     if message.channel.id in AI_ENABLED_CHANNELS:
         try:
             typing_task = asyncio.create_task(message.channel.typing())
             logging.info(f"AI処理開始: チャンネルID {message.channel.id}, ユーザー: {message.author.name}")
-            ai_response_text = await call_gemini_api(message.content)
+            # 🌟 Venice AI の呼び出し
+            ai_response_text = await call_venice_api(message.content)
             
             # typingタスクを安全にキャンセル
             typing_task.cancel()
@@ -692,7 +686,7 @@ async def help_slash(interaction: discord.Interaction):
     )
 
     commands_list = [
-        ("--- AI応答設定 (Gemini) ---", "高性能AIが質問に答えます。"),
+        ("--- AI応答設定 (Venice AI) ---", "高性能AIが質問に答えます。"),
         (f"`/ai_channel_toggle`", "このチャンネルをAI応答チャンネルとして設定/解除します。\n現在の状態: " + ai_status),
         ("--- ログ設定 (チャンネル選択機能付き) ---", "各ログ機能を独立して有効/無効に切り替え、送信先チャンネルを設定します。"),
         ("`/send_update_log <バージョン> <変更内容> <チャンネル>`", "Botの更新ログを指定チャンネルに送信します。（管理者専用）"),
