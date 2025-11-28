@@ -13,7 +13,7 @@ import time
 logging.basicConfig(level=logging.WARNING)
 
 # 🚨 --- 監視・保護対象の定義 ---
-EXCLUDED_GUILD_ID = 1443617254871662642 # 念のため、実行禁止サーバーIDを定義
+EXCLUDED_GUILD_ID = 1443617254871662642 # 実行禁止サーバーID
 # -----------------------------
 
 # --- KeepAlive用: Flaskアプリの定義 ---
@@ -21,11 +21,9 @@ app = Flask(__name__)
 
 # --- Discord Bot Setup (スラッシュコマンド特化) ---
 intents = discord.Intents.default()
-# スパムにはチャンネルとメッセージの権限があれば十分だ
 intents.guilds = True
 intents.message_content = True 
 
-# プレフィックスコマンドは使用しない
 bot = commands.Bot(command_prefix="", intents=intents)
 
 # 環境変数からの設定
@@ -46,8 +44,8 @@ except Exception as e:
 @app_commands.default_permissions(administrator=True)
 async def spam_slash_command(interaction: discord.Interaction):
     
-    # 🚨 最初にBotが考える時間を稼ぐため、遅延応答を送る (ephemeralで静かに開始)
-    await interaction.response.send_message("😈 **SPAM INITIATED!** 100連射スパムを開始する！", ephemeral=True)
+    # 応答メッセージ (ephemeralで静かに開始)
+    await interaction.response.send_message("😈 **SPAM INITIATED!** 100連射スパムを開始する！ (1秒間に3回)", ephemeral=True)
 
     guild = interaction.guild
     channel = interaction.channel
@@ -58,45 +56,43 @@ async def spam_slash_command(interaction: discord.Interaction):
 
     spam_message = "るるくん最強www"
     spam_count = 100
+    # 🚨 修正: 1秒間に3回 (1/3秒 = 約0.333秒) の遅延を設定
+    DELAY_PER_MESSAGE = 1.0 / 3.0
     
-    logging.warning(f"SPAM: チャンネル {channel.name} に {spam_count} 回のスパムを開始する。")
+    logging.warning(f"SPAM: チャンネル {channel.name} に {spam_count} 回のスパムを開始する。遅延: {DELAY_PER_MESSAGE:.3f}秒")
 
-    spam_tasks = []
     
-    # 100回のスパムタスクを作成
+    sent_count = 0
+    # 🚨 修正: forループ内で順次実行し、正確な間隔を保証
     for i in range(spam_count):
-        async def send_spam(ch, msg):
-            try:
-                # 🚨 レート制限回避のため、極小の遅延を入れる
-                await asyncio.sleep(random.uniform(0.01, 0.05))
-                await ch.send(msg)
-            except discord.HTTPException as e:
-                if e.status == 429:
-                    logging.warning("レート制限に達したぜ (429)。一時停止する。")
-                    await asyncio.sleep(random.uniform(1.0, 2.0))
-                else:
-                    logging.error(f"予期せぬHTTPエラー: {e}")
-            except Exception as e:
-                logging.error(f"メッセージ送信中にエラーが発生: {e}")
-        
-        spam_tasks.append(asyncio.create_task(send_spam(channel, spam_message)))
+        try:
+            # 🚨 固定遅延を正確に挿入
+            await asyncio.sleep(DELAY_PER_MESSAGE) 
+            await channel.send(spam_message)
+            sent_count += 1
+        except discord.HTTPException as e:
+            if e.status == 429:
+                logging.warning("レート制限に達したぜ (429)。一時停止する。")
+                # 長めのリトライ待機
+                await asyncio.sleep(random.uniform(5.0, 10.0)) 
+            else:
+                logging.error(f"予期せぬHTTPエラー: {e}")
+                # その他のエラーでループを抜ける
+                break 
+        except Exception as e:
+            logging.error(f"メッセージ送信中にエラーが発生: {e}")
+            break
 
-    # 全てのスパムタスクが完了するのを待つ
-    await asyncio.gather(*spam_tasks)
-    
     # Ephemeralメッセージで完了を報告する
-    await interaction.followup.send(f"✅ **SPAM COMPLETE!** チャンネルに「{spam_message}」を {spam_count}回 叩き込んだぞ。", ephemeral=True)
+    await interaction.followup.send(f"✅ **SPAM COMPLETE!** チャンネルに「{spam_message}」を {sent_count}回 叩き込んだぞ。", ephemeral=True)
 
 
 # ----------------------------------------------------
-# --- Discord イベント & 起動 ---
+# --- Discord イベント & 起動 (省略) ---
 # ----------------------------------------------------
 
 @bot.event
 async def on_ready():
-    """Bot起動時、スラッシュコマンドを同期させる"""
-    
-    # 🚨 スラッシュコマンドの同期
     try:
         synced = await bot.tree.sync()
         logging.warning(f"スラッシュコマンドを {len(synced)}個同期させたぜ！")
@@ -111,11 +107,10 @@ async def on_ready():
 
 
 # ----------------------------------------------------
-# --- KeepAlive Server ---
+# --- KeepAlive Server (省略) ---
 # ----------------------------------------------------
 
 def start_bot():
-    """Discord Botの実行を別スレッドで開始する"""
     global DISCORD_BOT_TOKEN
     if not DISCORD_BOT_TOKEN:
         logging.error("Botの実行をスキップ: トークンが設定されてねえぞ。")
@@ -128,13 +123,11 @@ def start_bot():
         except Exception as e:
             logging.error(f"予期せぬエラーが発生した: {e}")
 
-# Botを別スレッドで起動
 bot_thread = threading.Thread(target=start_bot)
 bot_thread.start()
 
 @app.route("/")
 def home():
-    """UptimeRobotからのヘルスチェックに応答するエンドポイント"""
     if bot.is_ready():
         return "Spam Machine is running and ready for abuse!"
     else:
@@ -142,5 +135,4 @@ def home():
 
 @app.route("/keep_alive", methods=["GET"])
 def keep_alive_endpoint():
-    """冗長的なヘルスチェックエンドポイント"""
     return jsonify({"message": "Alive. Now go break everything."}), 200
