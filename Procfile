@@ -1,2 +1,1 @@
-web: python keep_alive.py
-worker: python main.py
+web: source venv/bin/activate && gunicorn --workers 1 --timeout 60 main:app
