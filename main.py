@@ -2,137 +2,154 @@ import os
 import threading
 import discord
 from discord.ext import commands
-from discord import app_commands
 from flask import Flask, jsonify
 import logging
 import asyncio
-import random 
-import time
+# randomモジュールは不要になったため削除
 
-# ログ設定: 警告レベル以上のみ表示
-logging.basicConfig(level=logging.WARNING)
-
-# 🚨 --- 監視・保護対象の定義 ---
-EXCLUDED_GUILD_ID = 1443617254871662642 # 実行禁止サーバーID
-# -----------------------------
+# ログ設定: Botの動作確認のためINFOレベルも表示
+logging.basicConfig(level=logging.INFO)
 
 # --- KeepAlive用: Flaskアプリの定義 ---
 app = Flask(__name__)
 
-# --- Discord Bot Setup (スラッシュコマンド特化) ---
+# --- Discord Bot Setup ---
+# サーバー管理コマンドのために必要なインテントを設定
 intents = discord.Intents.default()
 intents.guilds = True
-intents.message_content = True 
+intents.members = True          # kick/banコマンドのために必要
+intents.message_content = True  # !コマンドの読み取りのために必要
 
-bot = commands.Bot(command_prefix="", intents=intents)
+# 🚨 Prefixを '!' に設定
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 環境変数からの設定
 try:
     DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") 
+    
     if not DISCORD_BOT_TOKEN:
-        logging.error("FATAL ERROR: 'DISCORD_BOT_TOKEN' is missing.")
+        logging.error("FATAL ERROR: 'DISCORD_BOT_TOKEN' is missing. Please set the environment variable.")
+
 except Exception as e:
     DISCORD_BOT_TOKEN = None
     logging.error(f"Initialization Error: {e}")
 
 
 # ----------------------------------------------------
-# --- 💀 スパム機能 (スラッシュコマンド /spam) ---
+# --- 🛠️ 管理コマンド ---
 # ----------------------------------------------------
 
-@bot.tree.command(name="spam", description="実行されたチャンネルに「るるくん最強www」を100回連続で送信する。")
-@app_commands.default_permissions(administrator=True)
-async def spam_slash_command(interaction: discord.Interaction):
-    
-    # 応答メッセージ (ephemeralで静かに開始)
-    await interaction.response.send_message("😈 **SPAM INITIATED!** 100連射スパムを開始する！ (1秒間に3回)", ephemeral=True)
+@bot.command(name="ping", help="Botのレイテンシを表示します。")
+async def ping(ctx):
+    # Botのレイテンシ（応答速度）を計算して送信
+    latency_ms = round(bot.latency * 1000)
+    await ctx.send(f"Pong! 応答速度: {latency_ms}ms")
 
-    guild = interaction.guild
-    channel = interaction.channel
-    
-    if guild.id == EXCLUDED_GUILD_ID:
-        await interaction.followup.send("🛡️ **このサーバーでは無効だ。** 実行禁止だぞ！", ephemeral=True)
+@bot.command(name="kick", help="指定したメンバーをサーバーからキックします。")
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason="理由なし"):
+    """メンバーをキックするコマンド"""
+    if member.id == ctx.author.id:
+        await ctx.send("自分自身をキックすることはできません。")
         return
-
-    spam_message = "るるくん最強www"
-    spam_count = 100
-    # 🚨 修正: 1秒間に3回 (1/3秒 = 約0.333秒) の遅延を設定
-    DELAY_PER_MESSAGE = 1.0 / 3.0
     
-    logging.warning(f"SPAM: チャンネル {channel.name} に {spam_count} 回のスパムを開始する。遅延: {DELAY_PER_MESSAGE:.3f}秒")
+    try:
+        await member.kick(reason=reason)
+        await ctx.send(f"✅ {member.display_name} をキックしました。理由: {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ Botにメンバーをキックする権限がありません。Botのロールを上位にしてください。")
+    except Exception as e:
+        await ctx.send(f"❌ キック中にエラーが発生しました: {e}")
 
-    
-    sent_count = 0
-    # 🚨 修正: forループ内で順次実行し、正確な間隔を保証
-    for i in range(spam_count):
-        try:
-            # 🚨 固定遅延を正確に挿入
-            await asyncio.sleep(DELAY_PER_MESSAGE) 
-            await channel.send(spam_message)
-            sent_count += 1
-        except discord.HTTPException as e:
-            if e.status == 429:
-                logging.warning("レート制限に達したぜ (429)。一時停止する。")
-                # 長めのリトライ待機
-                await asyncio.sleep(random.uniform(5.0, 10.0)) 
-            else:
-                logging.error(f"予期せぬHTTPエラー: {e}")
-                # その他のエラーでループを抜ける
-                break 
-        except Exception as e:
-            logging.error(f"メッセージ送信中にエラーが発生: {e}")
-            break
+@kick.error
+async def kick_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ このコマンドを実行するには「メンバーをキック」権限が必要です。")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ 使用法: `!kick [ユーザーメンションまたはID] [理由 (任意)]`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ 指定されたユーザーが見つかりません。")
 
-    # Ephemeralメッセージで完了を報告する
-    await interaction.followup.send(f"✅ **SPAM COMPLETE!** チャンネルに「{spam_message}」を {sent_count}回 叩き込んだぞ。", ephemeral=True)
+@bot.command(name="ban", help="指定したメンバーをサーバーから追放（BAN）します。")
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason="理由なし"):
+    """メンバーをBANするコマンド"""
+    if member.id == ctx.author.id:
+        await ctx.send("自分自身をBANすることはできません。")
+        return
+        
+    try:
+        await member.ban(reason=reason)
+        await ctx.send(f"✅ {member.display_name} をBANしました。理由: {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ BotにメンバーをBANする権限がありません。Botのロールを上位にしてください。")
+    except Exception as e:
+        await ctx.send(f"❌ BAN中にエラーが発生しました: {e}")
+
+@ban.error
+async def ban_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ このコマンドを実行するには「メンバーをBAN」権限が必要です。")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ 使用法: `!ban [ユーザーメンションまたはID] [理由 (任意)]`")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ 指定されたユーザーが見つかりません。")
 
 
 # ----------------------------------------------------
-# --- Discord イベント & 起動 (省略) ---
+# --- Discord イベント & 起動 ---
 # ----------------------------------------------------
 
 @bot.event
 async def on_ready():
-    try:
-        synced = await bot.tree.sync()
-        logging.warning(f"スラッシュコマンドを {len(synced)}個同期させたぜ！")
-    except Exception as e:
-        logging.error(f"スラッシュコマンドの同期に失敗した: {e}")
-        
+    """Bot起動時に実行"""
     await bot.change_presence(
-        status=discord.Status.dnd,
-        activity=discord.Game(name="スパム準備... /spam")
+        status=discord.Status.online,
+        activity=discord.Game(name="サーバーを管理中 | !help")
     )
-    logging.warning(f"Bot {bot.user} is operational and ready to cause chaos!")
+    logging.info(f"Bot {bot.user} が起動し、管理を開始しました。")
+
+@bot.event
+async def on_message(message):
+    """メッセージイベント"""
+    if message.author.bot:
+        return
+        
+    await bot.process_commands(message)
 
 
 # ----------------------------------------------------
-# --- KeepAlive Server (省略) ---
+# --- KeepAlive Server (Render/Uptime Robot対応) ---
 # ----------------------------------------------------
 
 def start_bot():
+    """Discord Botの実行を別スレッドで開始する"""
     global DISCORD_BOT_TOKEN
     if not DISCORD_BOT_TOKEN:
-        logging.error("Botの実行をスキップ: トークンが設定されてねえぞ。")
+        logging.error("Botの実行をスキップ: トークンが設定されていません。")
     else:
-        logging.warning("Discord Botを起動中... 破壊の時だ。")
+        logging.info("Discord Botを別スレッドで起動中...")
         try:
             bot.run(DISCORD_BOT_TOKEN, log_handler=None) 
+            
         except discord.errors.LoginFailure:
-            logging.error("ログイン失敗: Discord Bot Tokenが無効だ！")
+            logging.error("ログイン失敗: Discord Bot Tokenが無効です。")
         except Exception as e:
-            logging.error(f"予期せぬエラーが発生した: {e}")
+            logging.error(f"予期せぬエラーが発生しました: {e}")
 
+# Botを別スレッドで起動
 bot_thread = threading.Thread(target=start_bot)
 bot_thread.start()
 
 @app.route("/")
 def home():
+    """ヘルスチェックに応答するエンドポイント"""
     if bot.is_ready():
-        return "Spam Machine is running and ready for abuse!"
+        return "Management Bot is running."
     else:
-        return "Spam Machine is starting up or failed to start...", 503
+        return "Management Bot is starting up...", 503
 
 @app.route("/keep_alive", methods=["GET"])
 def keep_alive_endpoint():
-    return jsonify({"message": "Alive. Now go break everything."}), 200
+    """冗長的なヘルスチェックエンドポイント"""
+    return jsonify({"message": "Alive."}), 200
