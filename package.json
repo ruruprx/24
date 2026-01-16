@@ -1,0 +1,13 @@
+{
+  "name": "smm-bot",
+  "version": "1.0.0",
+  "description": "SMM Panel Vending Bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.13.0",
+    "axios": "^1.6.0"
+  }
+}
